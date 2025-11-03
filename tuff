@@ -1,0 +1,2724 @@
+--!strict
+--[[
+    Combined Ultimate Script - CORE
+    This script integrates Auto-Joiner, ESP, and gameplay features
+]]
+
+repeat task.wait() until game:IsLoaded()
+
+----------------------------------------------------------------------------------------------------
+-- CONFIGURATION LOADER
+----------------------------------------------------------------------------------------------------
+
+if not _G.CombinedConfig then
+    error("[Combined Script] Configuration not found! Please run the config script first.")
+    return
+end
+
+local CONFIG = _G.CombinedConfig
+local AUTO_JOIN = CONFIG.AUTO_JOIN
+local ESP_CONFIG = CONFIG.ESP
+local FEATURES = CONFIG.FEATURES
+
+-- Hardcoded settings
+local PLACE_ID: number? = 109983668079237
+local API_URL = "https://roblox-server-vfx3.onrender.com/logs"
+local POLL_INTERVAL = 0.000000001
+local MAX_NOTIFICATIONS = 8
+local NOTIFICATION_LIFETIME = 5
+
+-- ESP Hardcoded Settings
+local ESP_SETTINGS = {
+    SCAN_INTERVAL = 2,
+    TEXT_SIZE = 24,
+    NAME_COLOR = Color3.fromRGB(255, 255, 255),
+    GEN_COLOR = Color3.fromRGB(255, 255, 0),
+    TEXT_STROKE_TRANSPARENCY = 0.5,
+}
+
+-- Player ESP Config
+local PLAYER_ESP_CONFIG = {
+    ENABLED = ESP_CONFIG.PLAYER_ESP,
+    SHOW_NAMES = ESP_CONFIG.SHOW_NAMES,
+    SHOW_HEALTH = ESP_CONFIG.SHOW_HEALTH,
+    SHOW_DISTANCE = ESP_CONFIG.SHOW_DISTANCE,
+    SHOW_TEAM = ESP_CONFIG.SHOW_TEAM,
+    MAX_DISTANCE = ESP_CONFIG.MAX_DISTANCE,
+    FRIEND_COLOR = Color3.fromRGB(0, 255, 0),
+    ENEMY_COLOR = Color3.fromRGB(255, 0, 0),
+    NEUTRAL_COLOR = Color3.fromRGB(255, 255, 255),
+    BACKGROUND_COLOR = Color3.fromRGB(15, 15, 15),
+    BACKGROUND_TRANSPARENCY = 0.2,
+    BORDER_COLOR = Color3.fromRGB(100, 100, 100),
+    BORDER_THICKNESS = 2
+}
+
+-- X-Ray Settings
+local CLIENT_FILL_TRANSPARENCY = 0.85
+local OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)
+local OUTLINE_TRANSPARENCY = 0
+local FILL_TRANSPARENCY = 0.85
+
+-- Sentry Settings
+local SENTRY_PATTERN = "Sentry_"
+local SENTRY_TOGGLE_KEY = Enum.KeyCode.F
+local SENTRY_SWING_COOLDOWN = 0.08
+local SENTRY_HITBOX_SIZE = Vector3.new(25, 25, 25)
+local SENTRY_HEIGHT_OFFSET = 3
+local SENTRY_DESTROY_DELAY = 0.3
+
+-- Validation
+assert(typeof(AUTO_JOIN.MIN_GEN) == "number", "MIN_GEN must be a number")
+assert(typeof(AUTO_JOIN.MAX_GEN) == "number", "MAX_GEN must be a number")
+assert(typeof(AUTO_JOIN.EXCLUDE) == "table", "EXCLUDE must be a table")
+assert(typeof(AUTO_JOIN.INCLUDE) == "table", "INCLUDE must be a table")
+assert(typeof(AUTO_JOIN.RETRY_CONFIG) == "table", "RETRY_CONFIG must be a table")
+assert(typeof(ESP_CONFIG.ENABLE) == "boolean", "ESP.ENABLE must be a boolean")
+assert(typeof(ESP_CONFIG.MIN_GENERATION) == "number", "ESP.MIN_GENERATION must be a number")
+
+----------------------------------------------------------------------------------------------------
+-- SERVICES
+----------------------------------------------------------------------------------------------------
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local SoundService = game:GetService("SoundService")
+local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local function waitForLocalPlayer(): Player
+    local player = Players.LocalPlayer
+    while not player do
+        task.wait()
+        player = Players.LocalPlayer
+    end
+    return player
+end
+
+local LOCAL_PLAYER = waitForLocalPlayer()
+
+local function resolveGuiParent(): Instance
+    local success, hui = pcall(function()
+        local env = getfenv(0)
+        if typeof(env) ~= "table" then
+            return nil
+        end
+
+        local getter = rawget(env, "gethui")
+            or rawget(env, "get_hidden_gui")
+            or rawget(env, "hiddenui")
+
+        if typeof(getter) == "function" then
+            local ui = getter()
+            if typeof(ui) == "Instance" then
+                return ui
+            end
+        end
+
+        return nil
+    end)
+
+    if success and typeof(hui) == "Instance" then
+        return hui
+    end
+
+    local playerGui = LOCAL_PLAYER:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then
+        local ok, result = pcall(function()
+            return LOCAL_PLAYER:WaitForChild("PlayerGui", 5)
+        end)
+        if ok and result then
+            playerGui = result :: PlayerGui
+        end
+    end
+
+    if playerGui then
+        return playerGui
+    end
+
+    return game:GetService("CoreGui")
+end
+
+local GUI_PARENT = resolveGuiParent()
+local SOUND_ID = if AUTO_JOIN.SOUND ~= "" then "rbxassetid://" .. AUTO_JOIN.SOUND else nil
+
+----------------------------------------------------------------------------------------------------
+-- AUTO-JOIN UI CREATION
+----------------------------------------------------------------------------------------------------
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AutoJoinerHUD"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = GUI_PARENT
+
+local notificationContainer = Instance.new("Frame")
+notificationContainer.Name = "NotificationContainer"
+notificationContainer.Size = UDim2.new(0, 380, 0, 0)
+notificationContainer.AutomaticSize = Enum.AutomaticSize.Y
+notificationContainer.BackgroundTransparency = 1
+notificationContainer.Position = UDim2.new(0.5, 0, 0, 20)
+notificationContainer.AnchorPoint = Vector2.new(0.5, 0)
+notificationContainer.Parent = screenGui
+
+local notificationLayout = Instance.new("UIListLayout")
+notificationLayout.Padding = UDim.new(0, 12)
+notificationLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+notificationLayout.SortOrder = Enum.SortOrder.LayoutOrder
+notificationLayout.Parent = notificationContainer
+
+local autoJoinCard = Instance.new("Frame")
+autoJoinCard.Name = "AutoJoinCard"
+autoJoinCard.AnchorPoint = Vector2.new(1, 1)
+autoJoinCard.Position = UDim2.new(1, -24, 1, -24)
+autoJoinCard.Size = UDim2.new(0, 280, 0, 130)
+autoJoinCard.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+autoJoinCard.BackgroundTransparency = 0.05
+autoJoinCard.Parent = screenGui
+
+local autoJoinCorner = Instance.new("UICorner")
+autoJoinCorner.CornerRadius = UDim.new(0, 12)
+autoJoinCorner.Parent = autoJoinCard
+
+local autoJoinStroke = Instance.new("UIStroke")
+autoJoinStroke.Color = Color3.fromRGB(126, 178, 255)
+autoJoinStroke.Thickness = 1.5
+autoJoinStroke.Transparency = 0.25
+autoJoinStroke.Parent = autoJoinCard
+
+local autoJoinGradient = Instance.new("UIGradient")
+autoJoinGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(27, 40, 72)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 18, 22)),
+})
+autoJoinGradient.Rotation = 45
+autoJoinGradient.Parent = autoJoinCard
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Name = "Title"
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.GothamSemibold
+titleLabel.Text = "Auto Join Control"
+titleLabel.TextColor3 = Color3.fromRGB(220, 230, 255)
+titleLabel.TextSize = 18
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Position = UDim2.new(0, 16, 0, 12)
+titleLabel.Size = UDim2.new(1, -32, 0, 20)
+titleLabel.Parent = autoJoinCard
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "Status"
+statusLabel.BackgroundTransparency = 1
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.Text = "Status: " .. (AUTO_JOIN.ENABLE and "armed" or "manual")
+statusLabel.TextColor3 = Color3.fromRGB(180, 200, 255)
+statusLabel.TextSize = 14
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Position = UDim2.new(0, 16, 0, 40)
+statusLabel.Size = UDim2.new(1, -32, 0, 18)
+statusLabel.Parent = autoJoinCard
+
+local espStatusLabel = Instance.new("TextLabel")
+espStatusLabel.Name = "ESPStatus"
+espStatusLabel.BackgroundTransparency = 1
+espStatusLabel.Font = Enum.Font.Gotham
+espStatusLabel.Text = "ESP: " .. (ESP_CONFIG.ENABLE and "ON" or "OFF")
+espStatusLabel.TextColor3 = Color3.fromRGB(180, 200, 255)
+espStatusLabel.TextSize = 14
+espStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+espStatusLabel.Position = UDim2.new(0, 16, 0, 64)
+espStatusLabel.Size = UDim2.new(1, -32, 0, 18)
+espStatusLabel.Parent = autoJoinCard
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "Toggle"
+toggleButton.AnchorPoint = Vector2.new(1, 1)
+toggleButton.Position = UDim2.new(1, -16, 1, -16)
+toggleButton.Size = UDim2.new(0, 120, 0, 34)
+toggleButton.Font = Enum.Font.GothamSemibold
+toggleButton.TextSize = 16
+toggleButton.TextColor3 = Color3.fromRGB(18, 22, 28)
+toggleButton.Text = AUTO_JOIN.ENABLE and "Auto Join: ON" or "Auto Join: OFF"
+toggleButton.BackgroundColor3 = AUTO_JOIN.ENABLE and Color3.fromRGB(126, 255, 198) or Color3.fromRGB(255, 126, 126)
+toggleButton.AutoButtonColor = false
+toggleButton.Parent = autoJoinCard
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 12)
+toggleCorner.Parent = toggleButton
+
+local function updateToggleVisual()
+    toggleButton.Text = AUTO_JOIN.ENABLE and "Auto Join: ON" or "Auto Join: OFF"
+    toggleButton.BackgroundColor3 = AUTO_JOIN.ENABLE and Color3.fromRGB(126, 255, 198) or Color3.fromRGB(255, 126, 126)
+    statusLabel.Text = AUTO_JOIN.ENABLE and "Status: armed" or "Status: manual"
+    espStatusLabel.Text = "ESP: " .. (ESP_CONFIG.ENABLE and "ON" or "OFF")
+end
+
+toggleButton.Activated:Connect(function()
+    AUTO_JOIN.ENABLE = not AUTO_JOIN.ENABLE
+    updateToggleVisual()
+end)
+
+updateToggleVisual()
+
+----------------------------------------------------------------------------------------------------
+-- NOTIFICATION FACTORY
+----------------------------------------------------------------------------------------------------
+
+local activeNotifications: {Frame} = {}
+
+local function styleNotificationCard(card: Frame)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = card
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(110, 150, 255)
+    stroke.Thickness = 1.6
+    stroke.Transparency = 0.3
+    stroke.Parent = card
+
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(40, 52, 88)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(26, 28, 40)),
+    })
+    gradient.Rotation = 45
+    gradient.Parent = card
+end
+
+local function removeNotification(card: Frame)
+    local index = table.find(activeNotifications, card)
+    if index then
+        table.remove(activeNotifications, index)
+    end
+    if card.Parent then
+        card:Destroy()
+    end
+end
+
+local function parsePlayers(players: string): (number, number)
+    local current, max = players:match("(%d+)%/(%d+)")
+    return tonumber(current) or 0, tonumber(max) or 0
+end
+
+local function formatNumberShort(value: number): string
+    if value >= 10 ^ 9 then
+        return string.format("%.2fB", value / 10 ^ 9)
+    elseif value >= 10 ^ 6 then
+        return string.format("%.2fM", value / 10 ^ 6)
+    elseif value >= 10 ^ 3 then
+        return string.format("%.1fK", value / 10 ^ 3)
+    else
+        return tostring(math.floor(value))
+    end
+end
+
+local function getRetryAttempts(generationValue: number): number
+    local retryThresholds = {}
+    for key, attempts in pairs(AUTO_JOIN.RETRY_CONFIG) do
+        local numeric = tonumber(key:gsub("[^%d.]", ""))
+        if numeric and key:find("B") then
+            numeric = numeric * 1000000000
+        elseif numeric and key:find("M") then
+            numeric = numeric * 1000000
+        elseif numeric and key:find("K") then
+            numeric = numeric * 1000
+        end
+        if numeric and numeric > 0 then
+            table.insert(retryThresholds, { threshold = numeric, attempts = attempts })
+        end
+    end
+    table.sort(retryThresholds, function(a, b)
+        return a.threshold > b.threshold
+    end)
+    
+    for _, item in ipairs(retryThresholds) do
+        if generationValue >= item.threshold then
+            return item.attempts
+        end
+    end
+    return AUTO_JOIN.DEFAULT_ATTEMPTS
+end
+
+local function attemptTeleport(serverId: string, generationValue: number)
+    local maxAttempts = getRetryAttempts(generationValue)
+    
+    for attempt = 1, maxAttempts do
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(PLACE_ID, serverId, LOCAL_PLAYER)
+        end)
+        
+        if attempt < maxAttempts then
+            task.wait(AUTO_JOIN.RETRY_DELAY)
+        end
+    end
+end
+
+local function createNotification(log: any, generationValue: number)
+    while #activeNotifications >= MAX_NOTIFICATIONS do
+        local frame = table.remove(activeNotifications, 1)
+        if frame then
+            removeNotification(frame)
+        end
+    end
+
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(1, 0, 0, 120)
+    card.BackgroundColor3 = Color3.fromRGB(22, 24, 32)
+    card.BackgroundTransparency = 0.08
+    card.LayoutOrder = -os.time()
+    card.Parent = notificationContainer
+
+    styleNotificationCard(card)
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 12)
+    padding.PaddingBottom = UDim.new(0, 12)
+    padding.PaddingLeft = UDim.new(0, 16)
+    padding.PaddingRight = UDim.new(0, 16)
+    padding.Parent = card
+
+    local topRow = Instance.new("TextLabel")
+    topRow.BackgroundTransparency = 1
+    topRow.Font = Enum.Font.GothamSemibold
+    topRow.Text = log.brainrot
+    topRow.TextColor3 = Color3.fromRGB(225, 235, 255)
+    topRow.TextSize = 20
+    topRow.TextXAlignment = Enum.TextXAlignment.Left
+    topRow.Size = UDim2.new(1, 0, 0, 22)
+    topRow.Parent = card
+
+    local infoLabel = Instance.new("TextLabel")
+    infoLabel.BackgroundTransparency = 1
+    infoLabel.Font = Enum.Font.Gotham
+    infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    infoLabel.TextColor3 = Color3.fromRGB(170, 190, 255)
+    infoLabel.TextSize = 14
+    local currentPlayers, maxPlayers = parsePlayers(log.players)
+    infoLabel.Text = string.format("Gen: %s  •  Players: %d/%d  •  Owner: %s", log.generation, currentPlayers, maxPlayers, log.owner)
+    infoLabel.Position = UDim2.new(0, 0, 0, 30)
+    infoLabel.Size = UDim2.new(1, -120, 0, 18)
+    infoLabel.Parent = card
+
+    local genBadge = Instance.new("TextLabel")
+    genBadge.BackgroundTransparency = 1
+    genBadge.Font = Enum.Font.GothamBold
+    genBadge.Text = formatNumberShort(generationValue)
+    genBadge.TextColor3 = Color3.fromRGB(126, 255, 198)
+    genBadge.TextSize = 18
+    genBadge.TextXAlignment = Enum.TextXAlignment.Right
+    genBadge.Position = UDim2.new(1, -120, 0, 8)
+    genBadge.Size = UDim2.new(0, 100, 0, 28)
+    genBadge.Parent = card
+
+    local joinButton = Instance.new("TextButton")
+    joinButton.BackgroundColor3 = Color3.fromRGB(110, 188, 255)
+    joinButton.Text = "Join"
+    joinButton.Font = Enum.Font.GothamSemibold
+    joinButton.TextSize = 16
+    joinButton.TextColor3 = Color3.fromRGB(14, 20, 28)
+    joinButton.AutoButtonColor = false
+    joinButton.Position = UDim2.new(1, -120, 0, 76)
+    joinButton.Size = UDim2.new(0, 100, 0, 30)
+    joinButton.Parent = card
+
+    local joinCorner = Instance.new("UICorner")
+    joinCorner.CornerRadius = UDim.new(0, 10)
+    joinCorner.Parent = joinButton
+
+    local closeButton = Instance.new("TextButton")
+    closeButton.BackgroundTransparency = 1
+    closeButton.Text = "×"
+    closeButton.Font = Enum.Font.GothamBlack
+    closeButton.TextSize = 18
+    closeButton.TextColor3 = Color3.fromRGB(200, 210, 240)
+    closeButton.Position = UDim2.new(1, -16, 0, -6)
+    closeButton.Size = UDim2.new(0, 20, 0, 20)
+    closeButton.Parent = card
+
+    joinButton.MouseEnter:Connect(function()
+        TweenService:Create(joinButton, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(142, 206, 255)}):Play()
+    end)
+    joinButton.MouseLeave:Connect(function()
+        TweenService:Create(joinButton, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(110, 188, 255)}):Play()
+    end)
+
+    local function cleanup()
+        removeNotification(card)
+    end
+
+    closeButton.Activated:Connect(cleanup)
+
+    joinButton.Activated:Connect(function()
+        if not PLACE_ID then
+            return
+        end
+        
+        cleanup()
+        
+        task.spawn(function()
+            statusLabel.Text = string.format("Joining %s", log.brainrot)
+            attemptTeleport(log.serverId, generationValue)
+            statusLabel.Text = AUTO_JOIN.ENABLE and "Status: armed" or "Status: manual"
+        end)
+    end)
+
+    card.BackgroundTransparency = 1
+    for _, child in ipairs(card:GetChildren()) do
+        if child:IsA("TextLabel") then
+            child.TextTransparency = 1
+        elseif child:IsA("TextButton") then
+            child.TextTransparency = 1
+        end
+    end
+
+    TweenService:Create(card, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0.08}):Play()
+    for _, child in ipairs(card:GetChildren()) do
+        if child:IsA("TextLabel") or child:IsA("TextButton") then
+            TweenService:Create(child, TweenInfo.new(0.25), {TextTransparency = 0}):Play()
+        end
+    end
+
+    table.insert(activeNotifications, card)
+
+    task.delay(NOTIFICATION_LIFETIME, function()
+        removeNotification(card)
+    end)
+end
+
+----------------------------------------------------------------------------------------------------
+-- COSMETIC STRIPPER (Optional)
+----------------------------------------------------------------------------------------------------
+
+if FEATURES.STRIP_COSMETICS then
+    local function stripCosmetics(character)
+        if not character then
+            return
+        end
+
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:RemoveAccessories()
+        end
+
+        for _, child in ipairs(character:GetChildren()) do
+            if child:IsA("Accessory")
+                or child:IsA("Clothing")
+                or child:IsA("Shirt")
+                or child:IsA("Pants")
+                or child:IsA("ShirtGraphic")
+                or child:IsA("CharacterMesh")
+                or child:IsA("BodyColors") then
+                child:Destroy()
+            end
+        end
+    end
+
+    local function onCharacterAdded(character)
+        stripCosmetics(character)
+
+        character.ChildAdded:Connect(function(child)
+            if child:IsA("Accessory")
+                or child:IsA("Clothing")
+                or child:IsA("Shirt")
+                or child:IsA("Pants")
+                or child:IsA("ShirtGraphic")
+                or child:IsA("CharacterMesh")
+                or child:IsA("BodyColors") then
+                task.defer(function()
+                    if child.Parent then
+                        child:Destroy()
+                    end
+                end)
+            end
+        end)
+    end
+
+    local function hookPlayer(player)
+        if player.Character then
+            onCharacterAdded(player.Character)
+        end
+        player.CharacterAdded:Connect(onCharacterAdded)
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        hookPlayer(player)
+    end
+
+    Players.PlayerAdded:Connect(hookPlayer)
+end
+
+----------------------------------------------------------------------------------------------------
+-- CHARACTER REFERENCES
+----------------------------------------------------------------------------------------------------
+
+local currentCharacter = LOCAL_PLAYER and LOCAL_PLAYER.Character or nil
+local currentHumanoid = currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid") or nil
+local currentRootPart = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart") or nil
+
+local function refreshCharacterRefs(character)
+    currentCharacter = character
+    if character then
+        currentHumanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 5)
+        currentRootPart = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
+    else
+        currentHumanoid = nil
+        currentRootPart = nil
+    end
+end
+
+if currentCharacter then
+    refreshCharacterRefs(currentCharacter)
+end
+
+----------------------------------------------------------------------------------------------------
+-- REMOTE EVENTS
+----------------------------------------------------------------------------------------------------
+
+local REUseItem do
+    local packages = ReplicatedStorage:FindFirstChild("Packages")
+    if packages then
+        local net = packages:FindFirstChild("Net")
+        if net then
+            REUseItem = net:FindFirstChild("RE/UseItem")
+        end
+    end
+end
+
+local playerMouse do
+    local packages = ReplicatedStorage:FindFirstChild("Packages") or ReplicatedStorage:WaitForChild("Packages", 5)
+    if packages then
+        local module = packages:FindFirstChild("PlayerMouse")
+        if not module then
+            local ok, result = pcall(function()
+                return packages:WaitForChild("PlayerMouse", 5)
+            end)
+            if ok then
+                module = result
+            end
+        end
+
+        if module and module:IsA("ModuleScript") then
+            local ok, result = pcall(require, module)
+            if ok and typeof(result) == "table" then
+                playerMouse = result
+            end
+        end
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- GRAPPLE SPEED SYSTEM (Optional)
+----------------------------------------------------------------------------------------------------
+
+local speedActive = false
+local speedMultiplier = 5
+local grappleTool = nil
+
+local function findGrapple()
+    if not LOCAL_PLAYER then
+        return nil
+    end
+
+    if currentCharacter then
+        local toolInCharacter = currentCharacter:FindFirstChild("Grapple Hook")
+        if toolInCharacter then
+            return toolInCharacter
+        end
+    end
+
+    local backpack = LOCAL_PLAYER:FindFirstChildOfClass("Backpack")
+    if backpack then
+        local toolInBackpack = backpack:FindFirstChild("Grapple Hook")
+        if toolInBackpack then
+            return toolInBackpack
+        end
+    end
+
+    return nil
+end
+
+local function equipGrapple()
+    grappleTool = findGrapple()
+    if not grappleTool then
+        return false
+    end
+
+    if grappleTool.Parent == currentCharacter then
+        return true
+    end
+
+    local humanoid = currentHumanoid or (currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid"))
+    local backpack = LOCAL_PLAYER and LOCAL_PLAYER:FindFirstChildOfClass("Backpack") or nil
+    if humanoid and backpack and grappleTool.Parent == backpack then
+        humanoid:EquipTool(grappleTool)
+        return true
+    end
+
+    return grappleTool.Parent == currentCharacter
+end
+
+local function unequipGrapple()
+    grappleTool = findGrapple()
+    local humanoid = currentHumanoid or (currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid"))
+    if grappleTool and grappleTool.Parent == currentCharacter and humanoid then
+        humanoid:UnequipTools()
+        return true
+    end
+    return false
+end
+
+local function resetGrappleState()
+    speedActive = false
+    grappleTool = nil
+end
+
+local function toggleGrappleSpeed()
+    if not FEATURES.GRAPPLE_SPEED then
+        return
+    end
+
+    speedActive = not speedActive
+
+    if speedActive then
+        if not REUseItem then
+            local packages = ReplicatedStorage:FindFirstChild("Packages")
+            if packages then
+                local net = packages:FindFirstChild("Net")
+                if net then
+                    REUseItem = net:FindFirstChild("RE/UseItem")
+                end
+            end
+        end
+
+        if not REUseItem then
+            speedActive = false
+            return
+        end
+
+        if not currentCharacter or not currentHumanoid or not currentRootPart then
+            if LOCAL_PLAYER then
+                local newCharacter = LOCAL_PLAYER.Character or LOCAL_PLAYER.CharacterAdded:Wait()
+                if newCharacter then
+                    refreshCharacterRefs(newCharacter)
+                end
+            end
+        end
+
+        if not currentCharacter or not currentHumanoid or not currentRootPart then
+            speedActive = false
+            return
+        end
+
+        if equipGrapple() then
+            task.wait(0.1)
+        else
+            speedActive = false
+        end
+    else
+        unequipGrapple()
+        resetGrappleState()
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- DARK MATTER SLAP AUTO-EQUIP (Script Lag) (Optional)
+----------------------------------------------------------------------------------------------------
+
+local DARK_MATTER_TOOL_NAME = "Dark Matter Slap"
+local autoEquipDarkMatter = false
+
+local function getCharacter(waitForCharacter)
+    if not LOCAL_PLAYER then
+        return nil
+    end
+
+    local character = LOCAL_PLAYER.Character
+    if character or not waitForCharacter then
+        return character
+    end
+
+    return LOCAL_PLAYER.CharacterAdded:Wait()
+end
+
+local function getHumanoid(character, waitForHumanoid)
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if humanoid or not waitForHumanoid then
+        return humanoid
+    end
+
+    return character:WaitForChild("Humanoid")
+end
+
+local function findDarkMatterTool()
+    if not LOCAL_PLAYER then
+        return nil
+    end
+
+    local character = LOCAL_PLAYER.Character
+    if character then
+        local toolInCharacter = character:FindFirstChild(DARK_MATTER_TOOL_NAME)
+        if toolInCharacter then
+            return toolInCharacter
+        end
+    end
+
+    local backpack = LOCAL_PLAYER:FindFirstChildOfClass("Backpack")
+    if backpack then
+        local toolInBackpack = backpack:FindFirstChild(DARK_MATTER_TOOL_NAME)
+        if toolInBackpack then
+            return toolInBackpack
+        end
+    end
+
+    return nil
+end
+
+local function unequipDarkMatterSlap()
+    if not LOCAL_PLAYER then
+        return
+    end
+
+    local character = LOCAL_PLAYER.Character
+    if not character then
+        return
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        return
+    end
+
+    local tool = character:FindFirstChild(DARK_MATTER_TOOL_NAME)
+    if not tool then
+        return
+    end
+
+    humanoid:UnequipTools()
+
+    local backpack = LOCAL_PLAYER:FindFirstChildOfClass("Backpack")
+    if backpack then
+        tool.Parent = backpack
+    end
+end
+
+local function equipDarkMatterSlap(waitForCharacter)
+    if not LOCAL_PLAYER then
+        return
+    end
+
+    local character = getCharacter(waitForCharacter)
+    if not character then
+        return
+    end
+
+    local humanoid = getHumanoid(character, waitForCharacter)
+    if not humanoid then
+        return
+    end
+
+    local tool = findDarkMatterTool()
+    if not tool then
+        return
+    end
+
+    if tool.Parent ~= character then
+        humanoid:EquipTool(tool)
+    end
+end
+
+local function toggleAutoEquip()
+    if not FEATURES.SCRIPT_LAG then
+        return
+    end
+
+    autoEquipDarkMatter = not autoEquipDarkMatter
+    if autoEquipDarkMatter then
+        equipDarkMatterSlap(true)
+    else
+        unequipDarkMatterSlap()
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- INFINITE JUMP (Optional)
+----------------------------------------------------------------------------------------------------
+
+local infiniteJumpEnabled = FEATURES.INFINITE_JUMP
+local spaceHeld = false
+
+----------------------------------------------------------------------------------------------------
+-- AUTO DESTROY TURRET/SENTRY SYSTEM (Optional)
+----------------------------------------------------------------------------------------------------
+
+local sentryEnabled = false
+local lastSentrySwingTime = 0
+local currentSentryTarget = nil
+local sentryQueue = {}
+local sentryProcessing = false
+local originalSentryData = {}
+
+local sentryGui = {
+    screen = nil,
+    statusLabel = nil,
+    statusDot = nil,
+    glow = nil,
+    pulseTween = nil
+}
+
+local function createSentryGui()
+    if not FEATURES.AUTO_DESTROY_TURRET then
+        return
+    end
+
+    if not LOCAL_PLAYER then
+        return
+    end
+
+    local guiParent = LOCAL_PLAYER:FindFirstChildOfClass("PlayerGui") or LOCAL_PLAYER:WaitForChild("PlayerGui", 5)
+    if not guiParent then
+        return
+    end
+
+    if sentryGui.screen and sentryGui.screen.Parent ~= guiParent then
+        if sentryGui.pulseTween then
+            sentryGui.pulseTween:Cancel()
+            sentryGui.pulseTween = nil
+        end
+        sentryGui.screen:Destroy()
+        sentryGui.screen = nil
+    end
+
+    if sentryGui.screen then
+        return
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "SentryKillerUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.Parent = guiParent
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "Panel"
+    mainFrame.Size = UDim2.new(0, 220, 0, 65)
+    mainFrame.Position = UDim2.new(0, 20, 0, 20)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = mainFrame
+
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(25, 25, 35)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 15, 20))
+    })
+    gradient.Rotation = 90
+    gradient.Parent = mainFrame
+
+    local glow = Instance.new("Frame")
+    glow.Name = "Glow"
+    glow.Size = UDim2.new(1, 20, 1, 20)
+    glow.Position = UDim2.new(0, -10, 0, -10)
+    glow.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+    glow.BackgroundTransparency = 0.8
+    glow.BorderSizePixel = 0
+    glow.ZIndex = 0
+    glow.Parent = mainFrame
+
+    local glowCorner = Instance.new("UICorner")
+    glowCorner.CornerRadius = UDim.new(0, 15)
+    glowCorner.Parent = glow
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Name = "Title"
+    titleLabel.Size = UDim2.new(1, -20, 0, 20)
+    titleLabel.Position = UDim2.new(0, 15, 0, 8)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "AUTO TURRET"
+    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleLabel.TextSize = 14
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Parent = mainFrame
+
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
+    statusDot.Size = UDim2.new(0, 8, 0, 8)
+    statusDot.Position = UDim2.new(0, 15, 0, 38)
+    statusDot.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+    statusDot.BorderSizePixel = 0
+    statusDot.Parent = mainFrame
+
+    local dotCorner = Instance.new("UICorner")
+    dotCorner.CornerRadius = UDim.new(1, 0)
+    dotCorner.Parent = statusDot
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "StatusLabel"
+    statusLabel.Size = UDim2.new(1, -35, 0, 20)
+    statusLabel.Position = UDim2.new(0, 30, 0, 32)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "DISABLED"
+    statusLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+    statusLabel.TextSize = 15
+    statusLabel.Font = Enum.Font.GothamMedium
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.Parent = mainFrame
+
+    sentryGui.screen = screenGui
+    sentryGui.statusLabel = statusLabel
+    sentryGui.statusDot = statusDot
+    sentryGui.glow = glow
+end
+
+local function updateSentryGui()
+    if not FEATURES.AUTO_DESTROY_TURRET then
+        return
+    end
+
+    if not sentryGui.statusLabel or not sentryGui.statusDot or not sentryGui.glow then
+        createSentryGui()
+    end
+
+    if not sentryGui.statusLabel or not sentryGui.statusDot or not sentryGui.glow then
+        return
+    end
+
+    if sentryEnabled then
+        sentryGui.statusLabel.Text = "ENABLED"
+        sentryGui.statusDot.BackgroundColor3 = Color3.fromRGB(50, 220, 130)
+        sentryGui.glow.BackgroundColor3 = Color3.fromRGB(50, 220, 130)
+        sentryGui.statusDot.Size = UDim2.new(0, 8, 0, 8)
+
+        if not sentryGui.pulseTween then
+            local tweenInfo = TweenInfo.new(1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+            sentryGui.pulseTween = TweenService:Create(sentryGui.statusDot, tweenInfo, { Size = UDim2.new(0, 12, 0, 12) })
+            sentryGui.pulseTween:Play()
+        end
+    else
+        sentryGui.statusLabel.Text = "DISABLED"
+        sentryGui.statusDot.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+        sentryGui.glow.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+
+        if sentryGui.pulseTween then
+            sentryGui.pulseTween:Cancel()
+            sentryGui.pulseTween = nil
+        end
+
+        sentryGui.statusDot.Size = UDim2.new(0, 8, 0, 8)
+    end
+end
+
+local function getBatTool()
+    local character = currentCharacter
+    if character then
+        local tool = character:FindFirstChild("Bat")
+        if tool then
+            return tool
+        end
+    end
+
+    local backpack = LOCAL_PLAYER and LOCAL_PLAYER:FindFirstChildOfClass("Backpack")
+    if backpack then
+        local tool = backpack:FindFirstChild("Bat")
+        if tool then
+            return tool
+        end
+    end
+
+    return nil
+end
+
+local function equipBat()
+    local humanoid = currentHumanoid
+    if not humanoid then
+        return false
+    end
+
+    local bat = getBatTool()
+    if not bat then
+        return false
+    end
+
+    if bat.Parent ~= currentCharacter then
+        humanoid:EquipTool(bat)
+        task.wait(0.15)
+    end
+
+    return bat.Parent == currentCharacter
+end
+
+local function swingBat()
+    local now = os.clock()
+    if now - lastSentrySwingTime < SENTRY_SWING_COOLDOWN then
+        return false
+    end
+
+    lastSentrySwingTime = now
+
+    local character = currentCharacter
+    if not character then
+        return false
+    end
+
+    local bat = character:FindFirstChild("Bat")
+    if bat and bat:IsA("Tool") then
+        bat:Activate()
+
+        task.spawn(function()
+            task.wait(0.03)
+            pcall(function()
+                local camera = Workspace.CurrentCamera
+                if not camera then
+                    return
+                end
+                local viewport = camera.ViewportSize
+                local centerX = viewport.X / 2
+                local centerY = viewport.Y / 2
+                VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 0)
+                task.wait(0.02)
+                VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 0)
+            end)
+        end)
+
+        return true
+    end
+
+    return false
+end
+
+local function findAllSentries()
+    local sentries = {}
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj.Name:match(SENTRY_PATTERN) and (obj:IsA("Model") or obj:IsA("BasePart")) then
+            sentries[#sentries + 1] = obj
+        end
+    end
+    return sentries
+end
+
+local function getSentryMainPart(sentry)
+    if not sentry then
+        return nil
+    end
+
+    if sentry:IsA("Model") then
+        return sentry.PrimaryPart
+            or sentry:FindFirstChild("HumanoidRootPart")
+            or sentry:FindFirstChild("Head")
+            or sentry:FindFirstChild("Torso")
+            or sentry:FindFirstChildWhichIsA("BasePart")
+    elseif sentry:IsA("BasePart") then
+        return sentry
+    end
+
+    return nil
+end
+
+local function getSentryPosition(sentry)
+    if not sentry then
+        return nil
+    end
+
+    if sentry:IsA("Model") then
+        local mainPart = getSentryMainPart(sentry)
+        if mainPart then
+            return mainPart.Position
+        end
+        local ok, pivot = pcall(function()
+            return sentry:GetPivot()
+        end)
+        if ok and pivot then
+            return pivot.Position
+        end
+    elseif sentry:IsA("BasePart") then
+        return sentry.Position
+    end
+
+    return nil
+end
+
+local function sortSentriesByDistance(sentries)
+    local rootPart = currentRootPart
+    if not rootPart then
+        return sentries
+    end
+
+    table.sort(sentries, function(a, b)
+        local posA = getSentryPosition(a)
+        local posB = getSentryPosition(b)
+        if not posA then
+            return false
+        end
+        if not posB then
+            return true
+        end
+        return (rootPart.Position - posA).Magnitude < (rootPart.Position - posB).Magnitude
+    end)
+
+    return sentries
+end
+
+local function cleanupSentry(sentry)
+    local data = originalSentryData[sentry]
+    if not data then
+        return
+    end
+
+    originalSentryData[sentry] = nil
+
+    local mainPart = getSentryMainPart(sentry)
+    if mainPart and mainPart.Parent then
+        mainPart.Size = data.size
+        mainPart.Transparency = data.transparency
+        mainPart.CanCollide = data.canCollide
+        mainPart.Anchored = data.anchored
+
+        for _, child in ipairs(mainPart:GetChildren()) do
+            if child:IsA("BodyPosition") then
+                child:Destroy()
+            end
+        end
+    end
+end
+
+local function setupSentry(sentry)
+    local mainPart = getSentryMainPart(sentry)
+    local rootPart = currentRootPart
+    if not mainPart or not rootPart then
+        return false
+    end
+
+    if not originalSentryData[sentry] then
+        originalSentryData[sentry] = {
+            size = mainPart.Size,
+            transparency = mainPart.Transparency,
+            canCollide = mainPart.CanCollide,
+            anchored = mainPart.Anchored
+        }
+    end
+
+    mainPart.Size = SENTRY_HITBOX_SIZE
+    mainPart.Transparency = 0.7
+    mainPart.CanCollide = false
+    mainPart.Anchored = false
+
+    for _, descendant in ipairs(sentry:GetDescendants()) do
+        if descendant:IsA("Weld") or descendant:IsA("Motor6D") or descendant:IsA("Constraint") then
+            pcall(function()
+                descendant.Enabled = false
+            end)
+        end
+    end
+
+    return true
+end
+
+local function positionSentry(sentry)
+    local rootPart = currentRootPart
+    if not rootPart then
+        return false
+    end
+
+    local mainPart = getSentryMainPart(sentry)
+    if not mainPart then
+        return false
+    end
+
+    local offset = rootPart.CFrame.LookVector * 4
+    local targetPosition = rootPart.Position + offset + Vector3.new(0, SENTRY_HEIGHT_OFFSET, 0)
+    local targetCFrame = CFrame.new(targetPosition)
+
+    mainPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    mainPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+    if sentry:IsA("Model") then
+        sentry:PivotTo(targetCFrame)
+    else
+        mainPart.CFrame = targetCFrame
+    end
+
+    mainPart.Anchored = true
+    task.wait(0.05)
+    mainPart.Anchored = false
+
+    for _, child in ipairs(mainPart:GetChildren()) do
+        if child:IsA("BodyPosition") then
+            child:Destroy()
+        end
+    end
+
+    local bodyPosition = Instance.new("BodyPosition")
+    bodyPosition.Name = "SentryHoldPosition"
+    bodyPosition.MaxForce = Vector3.new(0, math.huge, 0)
+    bodyPosition.Position = targetPosition
+    bodyPosition.P = 10000
+    bodyPosition.D = 500
+    bodyPosition.Parent = mainPart
+
+    return true
+end
+
+local function destroySentry(sentry)
+    if not sentry or not sentry.Parent then
+        return false
+    end
+
+    if not equipBat() then
+        return false
+    end
+
+    task.wait(0.1)
+
+    if not setupSentry(sentry) then
+        return false
+    end
+
+    task.wait(0.1)
+
+    if not positionSentry(sentry) then
+        cleanupSentry(sentry)
+        return false
+    end
+
+    task.wait(0.2)
+
+    local swingCount = 0
+    local maxSwings = 60
+
+    while sentry.Parent and swingCount < maxSwings and sentryEnabled do
+        swingCount += 1
+        swingBat()
+
+        if swingCount % 3 == 0 then
+            positionSentry(sentry)
+        end
+
+        if swingCount % 10 == 0 then
+            positionSentry(sentry)
+            for _ = 1, 3 do
+                swingBat()
+                task.wait(0.05)
+            end
+        end
+
+        task.wait(0.08)
+
+        if not sentry.Parent then
+            cleanupSentry(sentry)
+            return true
+        end
+    end
+
+    cleanupSentry(sentry)
+    return false
+end
+
+local function processSentryQueue()
+    if sentryProcessing or not sentryEnabled then
+        return
+    end
+
+    sentryProcessing = true
+
+    while #sentryQueue > 0 and sentryEnabled do
+        currentSentryTarget = table.remove(sentryQueue, 1)
+        destroySentry(currentSentryTarget)
+        currentSentryTarget = nil
+
+        local humanoid = currentHumanoid
+        if humanoid then
+            humanoid:UnequipTools()
+        end
+
+        task.wait(SENTRY_DESTROY_DELAY)
+    end
+
+    sentryProcessing = false
+end
+
+local function scanAndQueueSentries()
+    if not sentryEnabled then
+        return
+    end
+
+    local sentries = findAllSentries()
+    if #sentries == 0 then
+        return
+    end
+
+    sentries = sortSentriesByDistance(sentries)
+
+    for _, sentry in ipairs(sentries) do
+        local alreadyQueued = false
+        for _, queued in ipairs(sentryQueue) do
+            if queued == sentry then
+                alreadyQueued = true
+                break
+            end
+        end
+
+        if not alreadyQueued then
+            sentryQueue[#sentryQueue + 1] = sentry
+        end
+    end
+
+    if not sentryProcessing then
+        task.spawn(processSentryQueue)
+    end
+end
+
+local function disableSentryKiller()
+    if not sentryEnabled then
+        return
+    end
+
+    sentryEnabled = false
+
+    if sentryGui.pulseTween then
+        sentryGui.pulseTween:Cancel()
+        sentryGui.pulseTween = nil
+    end
+
+    if currentSentryTarget then
+        cleanupSentry(currentSentryTarget)
+        currentSentryTarget = nil
+    end
+
+    for sentry in pairs(originalSentryData) do
+        cleanupSentry(sentry)
+    end
+
+    sentryQueue = {}
+    sentryProcessing = false
+    lastSentrySwingTime = 0
+
+    local humanoid = currentHumanoid
+    if humanoid then
+        humanoid:UnequipTools()
+    end
+
+    updateSentryGui()
+end
+
+local function enableSentryKiller()
+    if sentryEnabled then
+        return
+    end
+
+    if not currentHumanoid or not currentRootPart then
+        return
+    end
+
+    sentryEnabled = true
+    updateSentryGui()
+    scanAndQueueSentries()
+end
+
+local function toggleSentryKiller()
+    if not FEATURES.AUTO_DESTROY_TURRET then
+        return
+    end
+
+    if sentryEnabled then
+        disableSentryKiller()
+    else
+        enableSentryKiller()
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- WEBSLING TARGET
+----------------------------------------------------------------------------------------------------
+
+local function getNearestWebslingTarget()
+    if not LOCAL_PLAYER then
+        return nil
+    end
+
+    local character = currentCharacter or LOCAL_PLAYER.Character
+    if not character then
+        return nil
+    end
+
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then
+        return nil
+    end
+
+    local myPosition = rootPart.Position
+    local nearestPart
+    local shortestDistance = math.huge
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LOCAL_PLAYER then
+            local targetCharacter = player.Character
+            if targetCharacter then
+                local targetRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
+                if targetRoot then
+                    local targetHumanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+                    if targetHumanoid and targetHumanoid.Health > 0 then
+                        local candidate = targetCharacter:FindFirstChild("LowerTorso")
+                            or targetCharacter:FindFirstChild("UpperTorso")
+                            or targetRoot
+                        if candidate then
+                            local distance = (myPosition - candidate.Position).Magnitude
+                            if distance < shortestDistance then
+                                shortestDistance = distance
+                                nearestPart = candidate
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return nearestPart
+end
+
+----------------------------------------------------------------------------------------------------
+-- BRAINROT ESP SYSTEM
+----------------------------------------------------------------------------------------------------
+
+local espElements = {}
+local espContainer
+
+local function extractGenerationNumber(genString)
+    local genText = tostring(genString):gsub("%$", ""):gsub("/s", ""):gsub("%s+", "")
+    
+    local billionNumber = genText:match('(%d+%.?%d*)B')
+    if billionNumber then return tonumber(billionNumber) * 1000 end
+    
+    local millionNumber = genText:match('(%d+%.?%d*)M')
+    if millionNumber then return tonumber(millionNumber) end
+    
+    local rawNumber = tonumber(genText)
+    if rawNumber and rawNumber >= 1000000 then
+        return rawNumber / 1000000
+    end
+    
+    return 0
+end
+
+local function findGenerationRecursive(parent)
+    if not parent then return nil end
+    for _, descendant in ipairs(parent:GetDescendants()) do
+        if descendant:IsA('TextLabel') and descendant.Name == 'Generation' and descendant.Text ~= '' then
+            return descendant.Text
+        end
+    end
+    return nil
+end
+
+local function getGenerationFromBrainrot(plotId, brainrotName)
+    local success, result = pcall(function()
+        local plot = Workspace.Plots:FindFirstChild(plotId)
+        if not plot then return nil end
+        local folder = plot:FindFirstChild(brainrotName)
+        if not folder then return nil end
+        local fakeRootPart = folder:FindFirstChild('FakeRootPart')
+        if not fakeRootPart then return nil end
+        return findGenerationRecursive(fakeRootPart)
+    end)
+    return success and result or nil
+end
+
+local function checkPodium(plot, podiumName)
+    local success, result = pcall(function()
+        local podiumFolder = plot:FindFirstChild('AnimalPodiums')
+        if not podiumFolder then return nil end
+        local podium = podiumFolder:FindFirstChild(podiumName)
+        if not podium then return nil end
+        local base = podium:FindFirstChild('Base')
+        if not base then return nil end
+        local spawn = base:FindFirstChild('Spawn')
+        if not spawn then return nil end
+        
+        local position = spawn.Position
+        local attachment = spawn:FindFirstChild('Attachment')
+        
+        if attachment then
+            local overhead = attachment:FindFirstChild('AnimalOverhead')
+            if overhead then
+                local displayName = overhead:FindFirstChild('DisplayName')
+                local generation = overhead:FindFirstChild('Generation')
+                if displayName and displayName:IsA('TextLabel') and generation then
+                    return { 
+                        name = displayName.Text, 
+                        gen = generation.Text or tostring(generation.Value),
+                        hasAttachment = true,
+                        position = position
+                    }
+                end
+            end
+        end
+        
+        local promptAttachment = spawn:FindFirstChild('PromptAttachment')
+        if promptAttachment then
+            for _, child in ipairs(promptAttachment:GetChildren()) do
+                if child:IsA('ProximityPrompt') and child.ObjectText ~= '' then
+                    return { 
+                        name = child.ObjectText, 
+                        gen = 'Unknown', 
+                        hasAttachment = false,
+                        position = position
+                    }
+                end
+            end
+        end
+        return nil
+    end)
+    return success and result or nil
+end
+
+local function createESPBillboard(name, generation, position)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "BrainrotESP"
+    billboard.AlwaysOnTop = true
+    billboard.Size = UDim2.new(0, 200, 0, 60)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.Parent = espContainer
+    
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, 0, 0.5, 0)
+    nameLabel.Position = UDim2.new(0, 0, 0, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = name
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextSize = 24
+    nameLabel.TextStrokeTransparency = 0.5
+    nameLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.Parent = billboard
+    
+    local genLabel = Instance.new("TextLabel")
+    genLabel.Size = UDim2.new(1, 0, 0.5, 0)
+    genLabel.Position = UDim2.new(0, 0, 0.5, 0)
+    genLabel.BackgroundTransparency = 1
+    genLabel.Text = generation
+    genLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
+    genLabel.TextSize = 24
+    genLabel.TextStrokeTransparency = 0.5
+    genLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    genLabel.Font = Enum.Font.GothamBold
+    genLabel.Parent = billboard
+    
+    local part = Instance.new("Part")
+    part.Size = Vector3.new(0.1, 0.1, 0.1)
+    part.Position = position
+    part.Anchored = true
+    part.CanCollide = false
+    part.Transparency = 1
+    part.Name = "ESPAnchor"
+    part.Parent = espContainer
+    
+    billboard.Adornee = part
+    
+    return { billboard = billboard, anchor = part }
+end
+
+local function clearESP()
+    for _, element in pairs(espElements) do
+        if element.billboard then element.billboard:Destroy() end
+        if element.anchor then element.anchor:Destroy() end
+    end
+    table.clear(espElements)
+end
+
+local function scanAndDisplayBrainrots()
+    if not ESP_CONFIG.ENABLE then return end
+    
+    clearESP()
+    
+    local plots = Workspace:FindFirstChild('Plots')
+    if not plots then return end
+    
+    for _, plot in pairs(plots:GetChildren()) do
+        local animalPodiums = plot:FindFirstChild('AnimalPodiums')
+        
+        if animalPodiums then
+            local deferredChecks = {}
+            
+            for _, podium in pairs(animalPodiums:GetChildren()) do
+                local podiumData = checkPodium(plot, podium.Name)
+                
+                if podiumData and podiumData.position then
+                    if podiumData.hasAttachment and podiumData.gen ~= 'Unknown' then
+                        local genNum = extractGenerationNumber(podiumData.gen)
+                        if genNum >= ESP_CONFIG.MIN_GENERATION then
+                            local esp = createESPBillboard(podiumData.name, podiumData.gen, podiumData.position)
+                            table.insert(espElements, esp)
+                        end
+                    else
+                        table.insert(deferredChecks, {
+                            plotId = plot.Name,
+                            brainrotName = podiumData.name,
+                            position = podiumData.position
+                        })
+                    end
+                end
+            end
+            
+            for _, data in ipairs(deferredChecks) do
+                local generation = getGenerationFromBrainrot(data.plotId, data.brainrotName)
+                if generation and generation ~= 'Unknown' then
+                    local genNum = extractGenerationNumber(generation)
+                    if genNum >= ESP_CONFIG.MIN_GENERATION then
+                        local esp = createESPBillboard(data.brainrotName, generation, data.position)
+                        table.insert(espElements, esp)
+                    end
+                end
+            end
+        end
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- PLAYER ESP SYSTEM
+----------------------------------------------------------------------------------------------------
+
+local playerEspGui
+local playerEspEntries = {}
+
+local PLAYER_ESP_CONFIG = {
+    ENABLED = ESP_CONFIG.PLAYER_ESP or false,
+    SHOW_NAMES = ESP_CONFIG.SHOW_NAMES or true,
+    SHOW_HEALTH = ESP_CONFIG.SHOW_HEALTH or true,
+    SHOW_DISTANCE = ESP_CONFIG.SHOW_DISTANCE or true,
+    SHOW_TEAM = ESP_CONFIG.SHOW_TEAM or true,
+    MAX_DISTANCE = ESP_CONFIG.MAX_DISTANCE or 1000,
+}
+
+local function ensurePlayerEspGui()
+    if playerEspGui and playerEspGui.Parent then
+        return true
+    end
+
+    if not LOCAL_PLAYER then
+        return false
+    end
+
+    local guiParent = LOCAL_PLAYER:FindFirstChildOfClass("PlayerGui") or LOCAL_PLAYER:WaitForChild("PlayerGui", 5)
+    if not guiParent then
+        return false
+    end
+
+    if not playerEspGui then
+        playerEspGui = Instance.new("ScreenGui")
+        playerEspGui.Name = "PlayerESP"
+        playerEspGui.ResetOnSpawn = false
+        playerEspGui.IgnoreGuiInset = true
+        playerEspGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        playerEspGui.DisplayOrder = 9998
+    end
+
+    playerEspGui.Parent = guiParent
+    return true
+end
+
+local function createPlayerEspCard()
+    if not ensurePlayerEspGui() then
+        return nil
+    end
+
+    local card = Instance.new("Frame")
+    card.Name = "PlayerCard"
+    card.Size = UDim2.fromOffset(200, 80)
+    card.AnchorPoint = Vector2.new(0.5, 0.5)
+    card.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    card.BackgroundTransparency = 0.2
+    card.BorderSizePixel = 0
+    card.Visible = false
+    card.Parent = playerEspGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = card
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 2
+    stroke.Transparency = 0.1
+    stroke.Color = Color3.fromRGB(100, 100, 100)
+    stroke.Parent = card
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name = "NameLabel"
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Position = UDim2.new(0, 8, 0, 8)
+    nameLabel.Size = UDim2.new(1, -16, 0, 24)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.TextSize = 18
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextStrokeTransparency = 0.3
+    nameLabel.Parent = card
+
+    local healthLabel = Instance.new("TextLabel")
+    healthLabel.Name = "HealthLabel"
+    healthLabel.BackgroundTransparency = 1
+    healthLabel.Position = UDim2.new(0, 8, 0, 32)
+    healthLabel.Size = UDim2.new(1, -16, 0, 20)
+    healthLabel.Font = Enum.Font.GothamMedium
+    healthLabel.TextSize = 14
+    healthLabel.TextXAlignment = Enum.TextXAlignment.Left
+    healthLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    healthLabel.TextStrokeTransparency = 0.4
+    healthLabel.Parent = card
+
+    local distanceLabel = Instance.new("TextLabel")
+    distanceLabel.Name = "DistanceLabel"
+    distanceLabel.BackgroundTransparency = 1
+    distanceLabel.Position = UDim2.new(0, 8, 0, 52)
+    distanceLabel.Size = UDim2.new(1, -16, 0, 18)
+    distanceLabel.Font = Enum.Font.Gotham
+    distanceLabel.TextSize = 12
+    distanceLabel.TextXAlignment = Enum.TextXAlignment.Left
+    distanceLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    distanceLabel.TextStrokeTransparency = 0.5
+    distanceLabel.Parent = card
+
+    return card, nameLabel, healthLabel, distanceLabel
+end
+
+local function destroyPlayerEspEntry(player)
+    local entry = playerEspEntries[player]
+    if not entry then
+        return
+    end
+
+    for _, connection in ipairs(entry.connections) do
+        connection:Disconnect()
+    end
+
+    if entry.card then
+        entry.card:Destroy()
+    end
+
+    playerEspEntries[player] = nil
+end
+
+local function ensurePlayerEspEntry(player)
+    if playerEspEntries[player] or player == LOCAL_PLAYER then
+        return
+    end
+
+    local character = player.Character
+    if not character then
+        return
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not (humanoid and rootPart) then
+        return
+    end
+
+    local card, nameLabel, healthLabel, distanceLabel = createPlayerEspCard()
+    if not card then
+        return
+    end
+
+    nameLabel.Text = player.Name
+    healthLabel.Text = string.format("HP: %d/%d", math.floor(humanoid.Health), math.floor(humanoid.MaxHealth))
+    distanceLabel.Text = "Distance: 0"
+
+    local entry = {
+        player = player,
+        character = character,
+        humanoid = humanoid,
+        rootPart = rootPart,
+        card = card,
+        nameLabel = nameLabel,
+        healthLabel = healthLabel,
+        distanceLabel = distanceLabel,
+        connections = {}
+    }
+
+    entry.connections[#entry.connections + 1] = humanoid.HealthChanged:Connect(function(health)
+        entry.healthLabel.Text = string.format("HP: %d/%d", math.floor(health), math.floor(humanoid.MaxHealth))
+    end)
+
+    entry.connections[#entry.connections + 1] = player.CharacterAdded:Connect(function()
+        destroyPlayerEspEntry(player)
+        task.wait(1)
+        ensurePlayerEspEntry(player)
+    end)
+
+    entry.connections[#entry.connections + 1] = player.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            destroyPlayerEspEntry(player)
+        end
+    end)
+
+    playerEspEntries[player] = entry
+end
+
+----------------------------------------------------------------------------------------------------
+-- X-RAY SYSTEM
+----------------------------------------------------------------------------------------------------
+
+local highlights = {}
+local modelConnections = {}
+local observedPlots = {}
+local PlotsFolder
+
+local function cleanupModel(model)
+    local highlight = highlights[model]
+    if highlight then
+        highlight:Destroy()
+        highlights[model] = nil
+    end
+
+    local connections = modelConnections[model]
+    if connections then
+        for _, connection in ipairs(connections) do
+            connection:Disconnect()
+        end
+        modelConnections[model] = nil
+    end
+end
+
+local function applyXRayToModel(model)
+    if not model or not FEATURES.XRAY then
+        return
+    end
+
+    for _, obj in ipairs(model:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            obj.LocalTransparencyModifier = 0.85
+        end
+    end
+
+    local highlight = highlights[model]
+    if not highlight then
+        highlight = Instance.new("Highlight")
+        highlight.Adornee = model
+        highlight.FillTransparency = 0.85
+        highlight.OutlineTransparency = 0
+        highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+        highlight.Enabled = true
+        highlight.Parent = Workspace
+        highlights[model] = highlight
+    end
+
+    if not modelConnections[model] then
+        modelConnections[model] = {}
+        modelConnections[model][#modelConnections[model] + 1] = model.DescendantAdded:Connect(function(descendant)
+            if descendant:IsA("BasePart") then
+                descendant.LocalTransparencyModifier = 0.85
+            end
+        end)
+
+        modelConnections[model][#modelConnections[model] + 1] = model.AncestryChanged:Connect(function(_, parent)
+            if not parent then
+                cleanupModel(model)
+            end
+        end)
+    end
+end
+
+local function observePlot(plot)
+    if not plot or observedPlots[plot] or not FEATURES.XRAY then
+        return
+    end
+
+    local connections = {}
+    observedPlots[plot] = connections
+
+    local function handleDecorations(decorations)
+        if decorations and decorations:IsA("Instance") then
+            applyXRayToModel(decorations)
+        end
+    end
+
+    local decorations = plot:FindFirstChild("Decorations")
+    if decorations then
+        handleDecorations(decorations)
+    end
+
+    connections[#connections + 1] = plot.ChildAdded:Connect(function(child)
+        if child.Name == "Decorations" then
+            handleDecorations(child)
+        end
+    end)
+end
+
+local function initializeXRay()
+    if not FEATURES.XRAY then
+        return
+    end
+
+    local folder = Workspace:FindFirstChild("Plots")
+    if not folder then
+        task.spawn(function()
+            local located = Workspace:WaitForChild("Plots", 10)
+            if located then
+                initializeXRay()
+            end
+        end)
+        return
+    end
+
+    PlotsFolder = folder
+
+    for _, plot in ipairs(folder:GetChildren()) do
+        observePlot(plot)
+    end
+
+    folder.ChildAdded:Connect(function(plot)
+        observePlot(plot)
+    end)
+end
+
+----------------------------------------------------------------------------------------------------
+-- QUANTUM DESYNC SYSTEM
+----------------------------------------------------------------------------------------------------
+
+if FEATURES.QUANTUM_DESYNC then
+    local SCALE = 0.7
+    local PANEL_WIDTH = math.floor(212 * SCALE)
+    local PANEL_HEIGHT = math.floor(90 * SCALE)
+    local PANEL_RADIUS = math.floor(13 * SCALE)
+    local BTN_WIDTH = math.floor(0.89 * PANEL_WIDTH)
+    local BTN_HEIGHT = math.floor(34 * SCALE)
+    local BTN_RADIUS = math.floor(8 * SCALE)
+    
+    local function pressGui(btn)
+        if not btn or not btn.AbsoluteSize then return false end
+        local ok = false
+        
+        pcall(function()
+            if typeof(getconnections) == "function" then
+                for _, sig in ipairs({btn.MouseButton1Click, btn.Activated, btn.MouseButton1Down, btn.MouseButton1Up}) do
+                    if sig then
+                        for _, c in ipairs(getconnections(sig)) do
+                            if c and c.Fire then
+                                c:Fire()
+                                ok = true
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+        
+        pcall(function()
+            if typeof(firesignal) == "function" then
+                if btn.MouseButton1Down then firesignal(btn.MouseButton1Down); ok = true end
+                if btn.MouseButton1Click then firesignal(btn.MouseButton1Click); ok = true end
+                if btn.MouseButton1Up then firesignal(btn.MouseButton1Up); ok = true end
+                if btn.Activated then firesignal(btn.Activated); ok = true end
+            end
+        end)
+        
+        pcall(function()
+            btn:Activate()
+            ok = true
+        end)
+        
+        pcall(function()
+            local p, s = btn.AbsolutePosition, btn.AbsoluteSize
+            VirtualInputManager:SendMouseMoveEvent(p.X + s.X/2, p.Y + s.Y/2, game)
+            task.wait()
+            VirtualInputManager:SendMouseButtonEvent(p.X + s.X/2, p.Y + s.Y/2, 0, true, game, 0)
+            task.wait()
+            VirtualInputManager:SendMouseButtonEvent(p.X + s.X/2, p.Y + s.Y/2, 0, false, game, 0)
+            ok = true
+        end)
+        
+        return ok
+    end
+
+    local function pressChangeWithCloneAfter1s()
+        task.delay(0.03, function()
+            local function norm(s)
+                return (s or ""):lower():gsub("<.->", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+            end
+            
+            local deadline = os.clock() + 6
+            local lastBtn = nil
+            
+            while os.clock() < deadline do
+                local playerGui = LOCAL_PLAYER:FindFirstChildOfClass("PlayerGui")
+                local tf = playerGui and playerGui:FindFirstChild("ToolsFrames")
+                local qf = tf and tf:FindFirstChild("QuantumCloner")
+                
+                if qf then
+                    for _, d in ipairs(qf:GetDescendants()) do
+                        if d:IsA("TextButton") or d:IsA("ImageButton") then
+                            local txt = ""
+                            if d:IsA("TextButton") then
+                                txt = d.Text
+                            else
+                                local lbl = d:FindFirstChildWhichIsA("TextLabel", true)
+                                if lbl then txt = lbl.Text end
+                            end
+                            
+                            local t = norm(txt)
+                            local isChange = t:find("change", 1, true) and t:find("clone", 1, true)
+                            local isTp = (t:find("teleport", 1, true) or t:find("tp", 1, true)) and t:find("clone", 1, true)
+                            
+                            if isChange or isTp then
+                                lastBtn = d
+                                for i = 1, 6 do
+                                    if pressGui(d) then return end
+                                    task.wait(0.08)
+                                end
+                            end
+                        end
+                    end
+                end
+                task.wait(0.1)
+            end
+            
+            if lastBtn then
+                pressGui(lastBtn)
+            end
+        end)
+    end
+
+    local function findQCtool()
+        local char = LOCAL_PLAYER.Character or LOCAL_PLAYER.CharacterAdded:Wait()
+        for _, container in ipairs({char, LOCAL_PLAYER.Backpack}) do
+            if container then
+                for _, v in ipairs(container:GetChildren()) do
+                    if v:IsA("Tool") and v.Name:lower():find("quantum") then
+                        return v
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function equipAndCreateCloneNow()
+        local tool = findQCtool()
+        if not tool then return false end
+        
+        local char = LOCAL_PLAYER.Character or LOCAL_PLAYER.CharacterAdded:Wait()
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return false end
+        
+        hum:EquipTool(tool)
+        task.wait()
+        pcall(function() tool:Activate() end)
+        return true
+    end
+
+    local function run_main()
+        setfflag("WorldStepMax", "-9999999999999")
+        task.wait(1)
+        queue_on_teleport([[wait(3.5) setfflag("WorldStepMax", "-1")]])
+        pcall(function() TeleportService:Teleport(0) end)
+        task.wait(3)
+        setfflag("WorldStepMax", "1")
+        task.wait(1)
+        queue_on_teleport([[wait(3.5) setfflag("WorldStepMax", "1")]])
+        pcall(function() TeleportService:Teleport(0) end)
+    end
+
+    local function create_restart_button()
+        local playerGui = LOCAL_PLAYER:WaitForChild("PlayerGui")
+        
+        local old = playerGui:FindFirstChild("DesyncPanel")
+        if old then old:Destroy() end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "DesyncPanel"
+        gui.ResetOnSpawn = false
+        gui.Parent = playerGui
+
+        local main = Instance.new("Frame", gui)
+        main.Size = UDim2.new(0, PANEL_WIDTH, 0, PANEL_HEIGHT)
+        main.Position = UDim2.new(0, 1700, 0, 300)
+        main.BackgroundColor3 = Color3.fromRGB(13, 13, 13)
+        main.BorderSizePixel = 0
+        main.Active = true
+        Instance.new("UICorner", main).CornerRadius = UDim.new(0, PANEL_RADIUS)
+
+        local dragging, dragInput, dragStart, startPos
+        main.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = main.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
+                end)
+            end
+        end)
+        main.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+                dragInput = input
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and input == dragInput then
+                local delta = input.Position - dragStart
+                main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end)
+
+        local title = Instance.new("TextLabel", main)
+        title.Size = UDim2.new(1, 0, 0, math.floor(32 * SCALE))
+        title.Text = "desync"
+        title.Font = Enum.Font.Legacy
+        title.TextSize = math.floor(19 * SCALE)
+        title.BackgroundTransparency = 1
+        title.TextColor3 = Color3.fromRGB(255, 255, 255)
+
+        local btn = Instance.new("TextButton", main)
+        btn.Size = UDim2.new(0, BTN_WIDTH, 0, BTN_HEIGHT)
+        btn.Position = UDim2.new(0, math.floor((PANEL_WIDTH - BTN_WIDTH) / 2), 0, math.floor(38 * SCALE))
+        btn.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+        btn.Text = "RESTART"
+        btn.Font = Enum.Font.Legacy
+        btn.TextSize = math.floor(17 * SCALE)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.BorderSizePixel = 0
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, BTN_RADIUS)
+
+        btn.MouseButton1Click:Connect(function()
+            task.spawn(run_main)
+            if equipAndCreateCloneNow() then
+                pressChangeWithCloneAfter1s()
+            end
+        end)
+
+        UserInputService.InputBegan:Connect(function(input, processed)
+            if not processed and input.KeyCode == Enum.KeyCode.V then
+                task.spawn(run_main)
+                if equipAndCreateCloneNow() then
+                    pressChangeWithCloneAfter1s()
+                end
+            end
+        end)
+
+        return gui
+    end
+
+    task.spawn(function()
+        task.wait(1)
+        create_restart_button()
+    end)
+end
+
+----------------------------------------------------------------------------------------------------
+-- HTTP FUNCTIONS (AUTO-JOINER)
+----------------------------------------------------------------------------------------------------
+
+local function extractBody(result: any): (boolean, string?, string?)
+    if typeof(result) == "string" then
+        if result == "" then
+            return false, nil, "empty response"
+        end
+        return true, result, nil
+    elseif typeof(result) == "table" then
+        local body = result.Body or result.body or result.Data or result.data
+        if typeof(body) == "string" and body ~= "" then
+            return true, body, nil
+        end
+    end
+    return false, nil, "unsupported response"
+end
+
+local function httpGet(url: string): (boolean, string?)
+    local attempts = {}
+
+    local function addAttempt(name: string, fn: () -> any)
+        if typeof(fn) == "function" then
+            table.insert(attempts, { name = name, fn = fn })
+        end
+    end
+
+    local env = if typeof(getfenv) == "function" then getfenv(0) else nil
+
+    if typeof(env) == "table" then
+        local requestGlobal = rawget(env, "request")
+        if typeof(requestGlobal) == "function" then
+            addAttempt("request", function()
+                return requestGlobal({ Url = url, Method = "GET" })
+            end)
+        end
+    end
+
+    addAttempt("game:HttpGet", function()
+        return game:HttpGet(url)
+    end)
+
+    addAttempt("HttpService:GetAsync", function()
+        return HttpService:GetAsync(url, true)
+    end)
+
+    for _, attempt in ipairs(attempts) do
+        local ok, result = pcall(attempt.fn)
+        if ok then
+            local success, body, err = extractBody(result)
+            if success and body then
+                return true, body
+            end
+        end
+    end
+
+    return false, "no request method succeeded"
+end
+
+----------------------------------------------------------------------------------------------------
+-- AUTO-JOINER LOGIC
+----------------------------------------------------------------------------------------------------
+
+type LogEntry = {
+    brainrot: string,
+    generation: string,
+    owner: string,
+    serverId: string,
+    players: string,
+    timestamp: string,
+}
+
+local seenLogIds: {[string]: boolean} = {}
+local newestTimestamp: string? = nil
+
+local function parseAbbreviatedNumber(raw: string?): number
+    if not raw then
+        return 0
+    end
+
+    local sanitized = raw:upper():gsub("/S", ""):gsub("%s", "")
+    local numberPart, suffix = sanitized:match("([%d%.]+)([A-Z]*)")
+    local base = tonumber(numberPart)
+    if not base then
+        return 0
+    end
+
+    local multipliers = {
+        [""] = 1,
+        K = 10 ^ 3,
+        M = 10 ^ 6,
+        B = 10 ^ 9,
+        T = 10 ^ 12,
+    }
+
+    return base * (multipliers[suffix] or 1)
+end
+
+local function passesAutoJoinFilters(log: LogEntry, generationValue: number): boolean
+    if AUTO_JOIN.EXCLUDE[log.brainrot] then
+        return false
+    end
+
+    local includeRule = AUTO_JOIN.INCLUDE[log.brainrot]
+    if includeRule then
+        local op = includeRule.OPERATOR
+        local val = includeRule.VALUE
+        if op == ">=" then
+            return generationValue >= val
+        elseif op == ">" then
+            return generationValue > val
+        elseif op == "<" then
+            return generationValue < val
+        elseif op == "<=" then
+            return generationValue <= val
+        elseif op == "==" then
+            return generationValue == val
+        end
+    end
+
+    if generationValue < AUTO_JOIN.MIN_GEN then
+        return false
+    end
+    if generationValue > AUTO_JOIN.MAX_GEN then
+        return false
+    end
+
+    return true
+end
+
+local function playPingSound()
+    if not AUTO_JOIN.SOUND or AUTO_JOIN.SOUND == "" then
+        return
+    end
+
+    local sound = Instance.new("Sound")
+    sound.SoundId = "rbxassetid://" .. AUTO_JOIN.SOUND
+    sound.Volume = 0.7
+    sound.PlayOnRemove = true
+    sound.Parent = SoundService
+    sound:Destroy()
+end
+
+local function initializeBaseline()
+    local success, response = httpGet(API_URL)
+    if not success or typeof(response) ~= "string" then
+        return
+    end
+
+    local ok, parsed = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+    if not ok or typeof(parsed) ~= "table" then
+        return
+    end
+
+    local logs = parsed.logs
+    if typeof(logs) ~= "table" then
+        return
+    end
+
+    local latestTimestamp = newestTimestamp
+    for _, log in ipairs(logs) do
+        if typeof(log) == "table" then
+            local serverId = tostring(log.serverId or "")
+            local timestamp = tostring(log.timestamp or "")
+            if timestamp ~= "" then
+                local uniqueId = serverId .. "::" .. timestamp
+                seenLogIds[uniqueId] = true
+                if not latestTimestamp or timestamp > latestTimestamp then
+                    latestTimestamp = timestamp
+                end
+            end
+        end
+    end
+
+    newestTimestamp = latestTimestamp
+end
+
+local function processLogs(logs: {LogEntry})
+    table.sort(logs, function(a, b)
+        return a.timestamp < b.timestamp
+    end)
+
+    for _, log in ipairs(logs) do
+        local uniqueId = log.serverId .. "::" .. log.timestamp
+        if seenLogIds[uniqueId] then
+            continue
+        end
+
+        local generationValue = parseAbbreviatedNumber(log.generation)
+
+        if not passesAutoJoinFilters(log, generationValue) then
+            seenLogIds[uniqueId] = true
+            continue
+        end
+
+        seenLogIds[uniqueId] = true
+        newestTimestamp = log.timestamp
+
+        playPingSound()
+        createNotification(log, generationValue)
+
+        if AUTO_JOIN.ENABLE then
+            task.spawn(function()
+                attemptTeleport(log.serverId, generationValue)
+            end)
+        end
+    end
+end
+
+local function pollLogs()
+    local success, response = httpGet(API_URL)
+
+    if not success or typeof(response) ~= "string" then
+        return
+    end
+
+    local ok, parsed = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+
+    if not ok or typeof(parsed) ~= "table" then
+        return
+    end
+
+    local logs = parsed.logs
+    if typeof(logs) ~= "table" then
+        return
+    end
+
+    processLogs(logs)
+end
+
+----------------------------------------------------------------------------------------------------
+-- INPUT HANDLING
+----------------------------------------------------------------------------------------------------
+
+UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        if input.KeyCode == Enum.KeyCode.Space then
+            spaceHeld = true
+        end
+
+        if gameProcessedEvent then
+            return
+        end
+
+        if input.KeyCode == Enum.KeyCode.R and FEATURES.SCRIPT_LAG then
+            toggleAutoEquip()
+        elseif input.KeyCode == Enum.KeyCode.Q and FEATURES.GRAPPLE_SPEED then
+            toggleGrappleSpeed()
+        elseif input.KeyCode == Enum.KeyCode.F and FEATURES.AUTO_DESTROY_TURRET then
+            toggleSentryKiller()
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Space then
+        spaceHeld = false
+    end
+end)
+
+----------------------------------------------------------------------------------------------------
+-- CHARACTER MANAGEMENT
+----------------------------------------------------------------------------------------------------
+
+if LOCAL_PLAYER then
+    if LOCAL_PLAYER.Character then
+        refreshCharacterRefs(LOCAL_PLAYER.Character)
+    end
+
+    LOCAL_PLAYER.CharacterAdded:Connect(function(newCharacter)
+        refreshCharacterRefs(newCharacter)
+        resetGrappleState()
+        spaceHeld = false
+        disableSentryKiller()
+        if autoEquipDarkMatter and FEATURES.SCRIPT_LAG then
+            equipDarkMatterSlap(true)
+        end
+    end)
+
+    LOCAL_PLAYER.CharacterRemoving:Connect(function()
+        resetGrappleState()
+        disableSentryKiller()
+        currentCharacter = nil
+        currentHumanoid = nil
+        currentRootPart = nil
+    end)
+end
+
+----------------------------------------------------------------------------------------------------
+-- MAIN LOOP
+----------------------------------------------------------------------------------------------------
+
+RunService.Heartbeat:Connect(function()
+    -- Auto-equip Dark Matter
+    if autoEquipDarkMatter and FEATURES.SCRIPT_LAG then
+        equipDarkMatterSlap(false)
+    end
+
+    -- Update character refs
+    if currentCharacter and (not currentHumanoid or currentHumanoid.Parent ~= currentCharacter) then
+        currentHumanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
+    end
+
+    if currentCharacter and (not currentRootPart or currentRootPart.Parent ~= currentCharacter) then
+        currentRootPart = currentCharacter:FindFirstChild("HumanoidRootPart")
+    end
+
+    local humanoid = currentHumanoid
+    local rootPart = currentRootPart
+
+    -- Grapple Speed
+    if speedActive and FEATURES.GRAPPLE_SPEED then
+        if not currentCharacter or not humanoid or not rootPart then
+            resetGrappleState()
+            return
+        end
+
+        if not grappleTool or grappleTool.Parent ~= currentCharacter then
+            equipGrapple()
+        end
+
+        if humanoid.MoveDirection.Magnitude > 0 then
+            local moveDirection = humanoid.MoveDirection
+            local currentVelocity = rootPart.AssemblyLinearVelocity
+            local boostVelocity = moveDirection * humanoid.WalkSpeed * speedMultiplier
+
+            rootPart.AssemblyLinearVelocity = Vector3.new(
+                boostVelocity.X,
+                currentVelocity.Y,
+                boostVelocity.Z
+            )
+
+            if REUseItem then
+                pcall(function()
+                    REUseItem:FireServer(0.2065996805826823)
+                end)
+            end
+        end
+    end
+
+    -- Infinite Jump
+    if infiniteJumpEnabled and FEATURES.INFINITE_JUMP and spaceHeld and humanoid and rootPart and humanoid.Health > 0 then
+        rootPart.AssemblyLinearVelocity = Vector3.new(
+            rootPart.AssemblyLinearVelocity.X,
+            50,
+            rootPart.AssemblyLinearVelocity.Z
+        )
+    end
+
+    -- Websling target
+    if playerMouse then
+        local target = getNearestWebslingTarget()
+        if target and rootPart then
+            local direction = (target.Position - rootPart.Position).Unit
+            playerMouse.Hit = CFrame.lookAt(target.Position, target.Position + direction)
+            playerMouse.Target = target
+        end
+    end
+end)
+
+-- X-Ray frame counter to reduce overhead
+local xrayFrameCounter = 0
+RunService.RenderStepped:Connect(function()
+    -- X-Ray transparency (only every 10 frames to reduce lag)
+    if FEATURES.XRAY and PlotsFolder and PlotsFolder.Parent then
+        xrayFrameCounter = xrayFrameCounter + 1
+        if xrayFrameCounter >= 10 then
+            xrayFrameCounter = 0
+            for _, plot in ipairs(PlotsFolder:GetChildren()) do
+                local decorations = plot:FindFirstChild("Decorations")
+                if decorations then
+                    for _, obj in ipairs(decorations:GetDescendants()) do
+                        if obj:IsA("BasePart") then
+                            obj.LocalTransparencyModifier = 0.85
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Player ESP update
+    if PLAYER_ESP_CONFIG.ENABLED then
+        local camera = Workspace.CurrentCamera
+        if not camera then
+            return
+        end
+
+        local localRootPart = currentRootPart
+
+        for player, entry in pairs(playerEspEntries) do
+            local rootPart = entry.rootPart
+            if not (rootPart and rootPart.Parent) then
+                destroyPlayerEspEntry(player)
+                continue
+            end
+
+            local screenPoint, onScreen = camera:WorldToViewportPoint(rootPart.Position)
+
+            if onScreen and screenPoint.Z > 0 and localRootPart then
+                local distance = (localRootPart.Position - rootPart.Position).Magnitude
+
+                if distance <= PLAYER_ESP_CONFIG.MAX_DISTANCE then
+                    entry.card.Visible = true
+                    entry.card.Position = UDim2.fromOffset(screenPoint.X, screenPoint.Y - 60)
+                    entry.distanceLabel.Text = string.format("%.0f studs", distance)
+                else
+                    entry.card.Visible = false
+                end
+            else
+                entry.card.Visible = false
+            end
+        end
+    end
+end)
+
+----------------------------------------------------------------------------------------------------
+-- INITIALIZATION
+----------------------------------------------------------------------------------------------------
+
+-- Wait for game to load
+repeat task.wait() until Players.LocalPlayer and Players.LocalPlayer.Character
+repeat task.wait() until Workspace:FindFirstChild("Plots")
+
+task.wait(0.5)
+
+-- Initialize ESP
+if ESP_CONFIG.ENABLE then
+    espContainer = Instance.new("Folder")
+    espContainer.Name = "BrainrotESPContainer"
+    espContainer.Parent = Workspace
+    
+    task.spawn(function()
+        while task.wait(2) do
+            if ESP_CONFIG.ENABLE then
+                scanAndDisplayBrainrots()
+            end
+        end
+    end)
+end
+
+-- Initialize Player ESP
+if PLAYER_ESP_CONFIG.ENABLED then
+    task.spawn(function()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LOCAL_PLAYER then
+                ensurePlayerEspEntry(player)
+            end
+        end
+
+        Players.PlayerAdded:Connect(function(player)
+            if player ~= LOCAL_PLAYER then
+                task.wait(0.5)
+                ensurePlayerEspEntry(player)
+            end
+        end)
+
+        Players.PlayerRemoving:Connect(function(player)
+            destroyPlayerEspEntry(player)
+        end)
+    end)
+end
+
+-- Initialize X-Ray
+if FEATURES.XRAY then
+    task.spawn(function()
+        initializeXRay()
+    end)
+end
+
+-- Initialize Sentry Killer
+if FEATURES.AUTO_DESTROY_TURRET then
+    task.spawn(function()
+        createSentryGui()
+        updateSentryGui()
+    end)
+
+    task.spawn(function()
+        while true do
+            task.wait(5)
+            if sentryEnabled and not sentryProcessing then
+                scanAndQueueSentries()
+            end
+        end
+    end)
+end
+
+-- Initialize Auto-Joiner
+task.spawn(function()
+    initializeBaseline()
+    task.wait(0.3)
+    coroutine.wrap(function()
+        while true do
+            pollLogs()
+            task.wait(POLL_INTERVAL)
+        end
+    end)()
+end)
