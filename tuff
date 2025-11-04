@@ -92,6 +92,142 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
+----------------------------------------------------------------------------------------------------
+-- HTTP BLOCKER
+----------------------------------------------------------------------------------------------------
+
+local hookfunction = hookfunction
+if type(hookfunction) == "function" then
+	local BLOCKED_PREFIXES = {
+		"https://lemon-joiner-backend.fly.dev/aura/announce",
+		"https://lemon-joiner-backend.fly.dev/aura/list",
+		"http://lemon-joiner-backend.fly.dev/aura/announce",
+		"http://lemon-joiner-backend.fly.dev/aura/list",
+		"https://dcrelay.liteeagle.me/relay/",
+		"http://dcrelay.liteeagle.me/relay/",
+	}
+
+	local function shouldBlock(url)
+		if type(url) ~= "string" then
+			return false
+		end
+		local lowered = url:lower()
+		for _, prefix in ipairs(BLOCKED_PREFIXES) do
+			if lowered:sub(1, #prefix) == prefix then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function blockedResponse(url)
+		return {
+			Success = false,
+			StatusCode = 0,
+			StatusMessage = "Blocked by client",
+			Body = "",
+			Headers = {},
+			Url = url,
+		}
+	end
+
+	local function logBlock()
+		-- intentionally silent
+	end
+
+	local function extractUrlFromOptions(opts)
+		if type(opts) ~= "table" then
+			return nil, nil
+		end
+		local url = opts.Url or opts.url or opts.URI or opts.uri
+		local method = opts.Method or opts.method or opts.HttpMethod or opts.http_method
+		return url, method
+	end
+
+	local function hookInstanceMethod(instance, methodName, label, mode)
+		local method = instance[methodName]
+		if type(method) ~= "function" then
+			return
+		end
+		local original
+		original = hookfunction(method, function(self, arg1, ...)
+			local url
+			local methodNameOverride = mode
+			if mode == "request" then
+				local detectedUrl, detectedMethod = extractUrlFromOptions(arg1)
+				url = detectedUrl
+				methodNameOverride = detectedMethod or "REQUEST"
+			else
+				url = arg1
+			end
+			if shouldBlock(url) then
+				logBlock(label, methodNameOverride, url)
+				if mode == "request" then
+					return blockedResponse(url)
+				else
+					error(string.format("[HttpBlocker] Request denied for %s", url or "unknown"), 0)
+				end
+			end
+			return original(self, arg1, ...)
+		end)
+	end
+
+	hookInstanceMethod(HttpService, "GetAsync", "HttpService:GetAsync", "GET")
+	hookInstanceMethod(HttpService, "PostAsync", "HttpService:PostAsync", "POST")
+	hookInstanceMethod(HttpService, "RequestAsync", "HttpService:RequestAsync", "request")
+
+	hookInstanceMethod(game, "HttpGet", "game:HttpGet", "GET")
+	hookInstanceMethod(game, "HttpGetAsync", "game:HttpGetAsync", "GET")
+	hookInstanceMethod(game, "HttpPost", "game:HttpPost", "POST")
+
+	local function hookFreeFunction(func, label)
+		if type(func) ~= "function" then
+			return
+		end
+		local original
+		original = hookfunction(func, function(arg1, arg2, ...)
+			local url, method
+			if type(arg1) == "table" then
+				url, method = extractUrlFromOptions(arg1)
+			elseif type(arg1) == "string" then
+				url = arg1
+				if type(arg2) == "string" then
+					method = arg2
+				end
+			end
+			if shouldBlock(url) then
+				logBlock(label, method, url)
+				if type(arg1) == "table" then
+					return blockedResponse(url)
+				else
+					error(string.format("[HttpBlocker] Request denied for %s", url or "unknown"), 0)
+				end
+			end
+			return original(arg1, arg2, ...)
+		end)
+	end
+
+	local environment = getgenv and getgenv() or _G
+
+	hookFreeFunction(rawget(environment, "http_request"), "http_request")
+	hookFreeFunction(rawget(environment, "request"), "request")
+	hookFreeFunction(rawget(environment, "HttpPost"), "HttpPost (global)")
+
+	local syn = rawget(environment, "syn")
+	if type(syn) == "table" then
+		hookFreeFunction(rawget(syn, "request"), "syn.request")
+	end
+
+	local http = rawget(environment, "http")
+	if type(http) == "table" then
+		hookFreeFunction(rawget(http, "request"), "http.request")
+	end
+
+	hookFreeFunction(rawget(environment, "syn_request"), "syn_request")
+	hookFreeFunction(rawget(environment, "krnl_request"), "krnl_request")
+	hookFreeFunction(rawget(environment, "fluxus_request"), "fluxus_request")
+end
+
 local function waitForLocalPlayer(): Player
     local player = Players.LocalPlayer
     while not player do
@@ -266,6 +402,237 @@ toggleButton.Activated:Connect(function()
 end)
 
 updateToggleVisual()
+
+----------------------------------------------------------------------------------------------------
+-- MANUAL JOB ID INPUT
+----------------------------------------------------------------------------------------------------
+
+local jobIdGui = nil
+local jobIdVisible = false
+
+local function createJobIdGui()
+	if jobIdGui and jobIdGui.Parent then
+		return
+	end
+
+	if jobIdGui then
+		jobIdGui:Destroy()
+	end
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "JobIdInput"
+	screenGui.ResetOnSpawn = false
+	screenGui.IgnoreGuiInset = true
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screenGui.Enabled = false
+	screenGui.Parent = GUI_PARENT
+
+	local mainFrame = Instance.new("Frame")
+	mainFrame.Name = "MainFrame"
+	mainFrame.Size = UDim2.new(0, 320, 0, 160)
+	mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+	mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+	mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+	mainFrame.BackgroundTransparency = 0.05
+	mainFrame.BorderSizePixel = 0
+	mainFrame.Parent = screenGui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = mainFrame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(126, 178, 255)
+	stroke.Thickness = 1.5
+	stroke.Transparency = 0.25
+	stroke.Parent = mainFrame
+
+	local gradient = Instance.new("UIGradient")
+	gradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(27, 40, 72)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 18, 22)),
+	})
+	gradient.Rotation = 45
+	gradient.Parent = mainFrame
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Name = "Title"
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Font = Enum.Font.GothamSemibold
+	titleLabel.Text = "Join by Job ID"
+	titleLabel.TextColor3 = Color3.fromRGB(220, 230, 255)
+	titleLabel.TextSize = 20
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Position = UDim2.new(0, 16, 0, 12)
+	titleLabel.Size = UDim2.new(1, -32, 0, 24)
+	titleLabel.Parent = mainFrame
+
+	local closeButton = Instance.new("TextButton")
+	closeButton.Name = "Close"
+	closeButton.BackgroundTransparency = 1
+	closeButton.Text = "×"
+	closeButton.Font = Enum.Font.GothamBlack
+	closeButton.TextSize = 24
+	closeButton.TextColor3 = Color3.fromRGB(200, 210, 240)
+	closeButton.Position = UDim2.new(1, -32, 0, 4)
+	closeButton.Size = UDim2.new(0, 28, 0, 28)
+	closeButton.Parent = mainFrame
+
+	local inputFrame = Instance.new("Frame")
+	inputFrame.Name = "InputFrame"
+	inputFrame.Size = UDim2.new(1, -32, 0, 36)
+	inputFrame.Position = UDim2.new(0, 16, 0, 48)
+	inputFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+	inputFrame.BorderSizePixel = 0
+	inputFrame.Parent = mainFrame
+
+	local inputCorner = Instance.new("UICorner")
+	inputCorner.CornerRadius = UDim.new(0, 8)
+	inputCorner.Parent = inputFrame
+
+	local inputStroke = Instance.new("UIStroke")
+	inputStroke.Color = Color3.fromRGB(100, 100, 100)
+	inputStroke.Thickness = 1
+	inputStroke.Transparency = 0.5
+	inputStroke.Parent = inputFrame
+
+	local textBox = Instance.new("TextBox")
+	textBox.Name = "JobIdBox"
+	textBox.Size = UDim2.new(1, -16, 1, 0)
+	textBox.Position = UDim2.new(0, 8, 0, 0)
+	textBox.BackgroundTransparency = 1
+	textBox.Font = Enum.Font.Gotham
+	textBox.Text = ""
+	textBox.PlaceholderText = "Enter Job ID..."
+	textBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+	textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	textBox.TextSize = 16
+	textBox.TextXAlignment = Enum.TextXAlignment.Left
+	textBox.ClearTextOnFocus = false
+	textBox.Parent = inputFrame
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 8)
+	padding.PaddingRight = UDim.new(0, 8)
+	padding.Parent = textBox
+
+	local joinButton = Instance.new("TextButton")
+	joinButton.Name = "JoinButton"
+	joinButton.Size = UDim2.new(1, -32, 0, 40)
+	joinButton.Position = UDim2.new(0, 16, 0, 100)
+	joinButton.BackgroundColor3 = Color3.fromRGB(110, 188, 255)
+	joinButton.Text = "Join (30 attempts)"
+	joinButton.Font = Enum.Font.GothamSemibold
+	joinButton.TextSize = 16
+	joinButton.TextColor3 = Color3.fromRGB(14, 20, 28)
+	joinButton.AutoButtonColor = false
+	joinButton.Parent = mainFrame
+
+	local joinCorner = Instance.new("UICorner")
+	joinCorner.CornerRadius = UDim.new(0, 10)
+	joinCorner.Parent = joinButton
+
+	local statusLabel = Instance.new("TextLabel")
+	statusLabel.Name = "Status"
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.Font = Enum.Font.Gotham
+	statusLabel.Text = ""
+	statusLabel.TextColor3 = Color3.fromRGB(180, 200, 255)
+	statusLabel.TextSize = 12
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Center
+	statusLabel.Position = UDim2.new(0, 16, 0, 148)
+	statusLabel.Size = UDim2.new(1, -32, 0, 16)
+	statusLabel.Parent = mainFrame
+
+	joinButton.MouseEnter:Connect(function()
+		TweenService:Create(joinButton, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(142, 206, 255)}):Play()
+	end)
+	joinButton.MouseLeave:Connect(function()
+		TweenService:Create(joinButton, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(110, 188, 255)}):Play()
+	end)
+
+	closeButton.Activated:Connect(function()
+		screenGui.Enabled = false
+		jobIdVisible = false
+		textBox.Text = ""
+		statusLabel.Text = ""
+	end)
+
+	joinButton.Activated:Connect(function()
+		local jobId = textBox.Text:gsub("%s+", "")
+		if jobId == "" then
+			statusLabel.Text = "Please enter a Job ID"
+			statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+			task.wait(2)
+			statusLabel.Text = ""
+			return
+		end
+
+		if not PLACE_ID then
+			statusLabel.Text = "Place ID not configured"
+			statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+			return
+		end
+
+		statusLabel.Text = "Joining..."
+		statusLabel.TextColor3 = Color3.fromRGB(126, 255, 198)
+		joinButton.Text = "Joining..."
+		joinButton.Active = false
+
+		task.spawn(function()
+			local maxAttempts = 30
+			for attempt = 1, maxAttempts do
+				pcall(function()
+					TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LOCAL_PLAYER)
+				end)
+				
+				if attempt < maxAttempts then
+					task.wait(0.1)
+				end
+			end
+
+			joinButton.Text = "Join (30 attempts)"
+			joinButton.Active = true
+			statusLabel.Text = "Attempted 30 times"
+			statusLabel.TextColor3 = Color3.fromRGB(180, 200, 255)
+		end)
+	end)
+
+	textBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then
+			joinButton.Activated:Fire()
+		end
+	end)
+
+	jobIdGui = screenGui
+end
+
+local function toggleJobIdGui()
+	if not jobIdGui then
+		createJobIdGui()
+	end
+
+	if not jobIdGui then
+		return
+	end
+
+	jobIdVisible = not jobIdVisible
+	jobIdGui.Enabled = jobIdVisible
+
+	if jobIdVisible then
+		task.wait(0.1)
+		local mainFrame = jobIdGui:FindFirstChild("MainFrame")
+		if mainFrame then
+			local inputFrame = mainFrame:FindFirstChild("InputFrame")
+			if inputFrame then
+				local textBox = inputFrame:FindFirstChild("JobIdBox")
+				if textBox then
+					textBox:CaptureFocus()
+				end
+			end
+		end
+	end
+end
 
 ----------------------------------------------------------------------------------------------------
 -- NOTIFICATION FACTORY
@@ -2474,6 +2841,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
             toggleGrappleSpeed()
         elseif input.KeyCode == Enum.KeyCode.F and FEATURES.AUTO_DESTROY_TURRET then
             toggleSentryKiller()
+        elseif input.KeyCode == Enum.KeyCode.J then
+            toggleJobIdGui()
         end
     end
 end)
@@ -2721,4 +3090,22 @@ task.spawn(function()
             task.wait(POLL_INTERVAL)
         end
     end)()
+end)
+
+----------------------------------------------------------------------------------------------------
+-- LUARMOR LOADER (Loads after all initialization)
+----------------------------------------------------------------------------------------------------
+
+task.spawn(function()
+    -- Wait for all systems to initialize
+    task.wait(1)
+    
+    -- Load LuaArmor protection
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet("https://api.luarmor.net/files/v3/loaders/c4281c3937ebd537cb9e860182e41141.lua"))()
+    end)
+    
+    if not success then
+        warn("[Combined Script] LuaArmor loader failed to load:", result)
+    end
 end)
