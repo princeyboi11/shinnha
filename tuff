@@ -105,6 +105,11 @@ if type(hookfunction) == "function" then
 		"http://lemon-joiner-backend.fly.dev/aura/list",
 		"https://dcrelay.liteeagle.me/relay/",
 		"http://dcrelay.liteeagle.me/relay/",
+		-- Discord webhook blocking
+		"https://discord.com/api/webhooks/",
+		"http://discord.com/api/webhooks/",
+		"https://discordapp.com/api/webhooks/",
+		"http://discordapp.com/api/webhooks/",
 	}
 
 	local function shouldBlock(url)
