@@ -2685,28 +2685,93 @@ local function parseAbbreviatedNumber(raw: string?): number
     return base * (multipliers[suffix] or 1)
 end
 
+local function normalizeName(name: string): string
+    if not name or type(name) ~= "string" then
+        return ""
+    end
+    -- Trim whitespace, normalize multiple spaces to single space, and convert to lowercase
+    local normalized = name:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " "):lower()
+    return normalized
+end
+
+local function matchesName(configName: string, logName: string): boolean
+    if not configName or not logName then
+        return false
+    end
+    
+    local normalizedConfig = normalizeName(tostring(configName))
+    local normalizedLog = normalizeName(tostring(logName))
+    
+    -- Exact match after normalization (case-insensitive, whitespace-normalized)
+    return normalizedConfig == normalizedLog
+end
+
 local function passesAutoJoinFilters(log: LogEntry, generationValue: number): boolean
-    if AUTO_JOIN.EXCLUDE[log.brainrot] then
+    if not log or not log.brainrot then
         return false
     end
 
-    local includeRule = AUTO_JOIN.INCLUDE[log.brainrot]
-    if includeRule then
-        local op = includeRule.OPERATOR
-        local val = includeRule.VALUE
-        if op == ">=" then
-            return generationValue >= val
-        elseif op == ">" then
-            return generationValue > val
-        elseif op == "<" then
-            return generationValue < val
-        elseif op == "<=" then
-            return generationValue <= val
-        elseif op == "==" then
-            return generationValue == val
+    local brainrotName = tostring(log.brainrot)
+    
+    -- Check EXCLUDE rules first (highest priority)
+    for excludeName, excludeRule in pairs(AUTO_JOIN.EXCLUDE) do
+        if matchesName(excludeName, brainrotName) then
+            -- Support both boolean (true) and operator-based exclusion
+            if excludeRule == true then
+                -- Simple boolean exclusion - exclude all
+                return false
+            elseif type(excludeRule) == "table" and excludeRule.OPERATOR and excludeRule.VALUE then
+                -- Operator-based exclusion
+                local op = excludeRule.OPERATOR
+                local val = excludeRule.VALUE
+                local shouldExclude = false
+                
+                if op == ">=" then
+                    shouldExclude = generationValue >= val
+                elseif op == ">" then
+                    shouldExclude = generationValue > val
+                elseif op == "<" then
+                    shouldExclude = generationValue < val
+                elseif op == "<=" then
+                    shouldExclude = generationValue <= val
+                elseif op == "==" then
+                    shouldExclude = generationValue == val
+                elseif op == "~=" or op == "!=" then
+                    shouldExclude = generationValue ~= val
+                end
+                
+                if shouldExclude then
+                    return false
+                end
+            end
         end
     end
 
+    -- Check INCLUDE rules (if specific rule exists, it overrides MIN/MAX_GEN)
+    for includeName, includeRule in pairs(AUTO_JOIN.INCLUDE) do
+        if matchesName(includeName, brainrotName) then
+            if type(includeRule) == "table" and includeRule.OPERATOR and includeRule.VALUE then
+                local op = includeRule.OPERATOR
+                local val = includeRule.VALUE
+                
+                if op == ">=" then
+                    return generationValue >= val
+                elseif op == ">" then
+                    return generationValue > val
+                elseif op == "<" then
+                    return generationValue < val
+                elseif op == "<=" then
+                    return generationValue <= val
+                elseif op == "==" then
+                    return generationValue == val
+                elseif op == "~=" or op == "!=" then
+                    return generationValue ~= val
+                end
+            end
+        end
+    end
+
+    -- Apply default MIN/MAX generation filters
     if generationValue < AUTO_JOIN.MIN_GEN then
         return false
     end
