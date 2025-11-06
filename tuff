@@ -2694,8 +2694,11 @@ local function normalizeName(name: string): string
     if not name or type(name) ~= "string" then
         return ""
     end
+    -- Strip "1x ", "2x ", etc. prefix if present (e.g., "1x Los Tortus" -> "Los Tortus")
+    -- Handles both "1x " and "1 x " formats
+    local cleaned = name:gsub("^%d+%s*x%s+", "")
     -- Trim whitespace, normalize multiple spaces to single space, and convert to lowercase
-    local normalized = name:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " "):lower()
+    local normalized = cleaned:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " "):lower()
     return normalized
 end
 
@@ -2771,7 +2774,13 @@ local function passesAutoJoinFilters(log: LogEntry, generationValue: number): bo
                     return generationValue == val
                 elseif op == "~=" or op == "!=" then
                     return generationValue ~= val
+                else
+                    -- Invalid operator, reject this entry
+                    return false
                 end
+            else
+                -- INCLUDE rule exists but format is invalid, reject this entry
+                return false
             end
         end
     end
