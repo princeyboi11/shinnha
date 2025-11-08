@@ -3189,20 +3189,3 @@ task.spawn(function()
     end
 end)
 
-----------------------------------------------------------------------------------------------------
--- CHILLI SCRIPT LOADER (Loads after all initialization)
-----------------------------------------------------------------------------------------------------
-
-task.spawn(function()
-    -- Wait for all systems to initialize
-    task.wait(0.5)
-    
-    -- Load Chilli script
-    local success, result = pcall(function()
-        return loadstring(game:HttpGet("https://raw.githubusercontent.com/tienkhanh1/spicy/main/Chilli.lua"))()
-    end)
-    
-    if not success then
-        warn("[Combined Script] Chilli script failed to load:", result)
-    end
-end)
