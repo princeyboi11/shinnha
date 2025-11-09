@@ -1,0 +1,398 @@
+-- Optimized Roblox Brainrot Scanner with Server Hopping
+-- Scans for brainrots, sends to Render server, then hops
+
+-- FPS CAP for performance
+if setfpscap then
+    setfpscap(5)
+else
+    warn("Executor does not support setfpscap!")
+end
+
+repeat task.wait() until game:IsLoaded()
+
+wait(1)
+
+
+local workspace = game:GetService('Workspace')
+local Players = game:GetService('Players')
+local TeleportService = game:GetService('TeleportService')
+local HttpService = game:GetService('HttpService')
+
+-- ==================== CONFIGURATION ====================
+-- CHANGE THIS TO YOUR RENDER URL!
+local RENDER_URL = "https://roblox-server-vfx3.onrender.com"
+local PLACE_ID = 109983668079237
+local MIN_GENERATION = 1 -- Minimum generation in millions
+
+print("="..string.rep("=", 50))
+print("🚀 ROBLOX BRAINROT SCANNER STARTED")
+print("📡 Server:", RENDER_URL)
+print("="..string.rep("=", 50))
+
+-- ==================== RNG FOR SERVER HOPPING ====================
+local function newClientRng()
+    local uid = (Players.LocalPlayer and Players.LocalPlayer.UserId) or 0
+    local t = os.clock()
+    local tnum = tonumber((tostring(t):gsub('%.', '')):sub(-7)) or 0
+    return Random.new(uid + tnum)
+end
+local RNG = newClientRng()
+
+-- ==================== HELPER FUNCTIONS ====================
+
+local function extractGenerationNumber(genString)
+    local genText = tostring(genString)
+    local billionNumber = genText:match('(%d+%.?%d*)B')
+    if billionNumber then return tonumber(billionNumber)*1000 end
+    local millionNumber = genText:match('(%d+%.?%d*)M')
+    if millionNumber then return tonumber(millionNumber) end
+    return 0
+end
+
+local function getPlotOwner(plot)
+    local success, result = pcall(function()
+        -- Try PlotSign first
+        if plot:FindFirstChild('PlotSign') then
+            local sign = plot.PlotSign:FindFirstChild('SurfaceGui')
+            if sign then
+                local frame = sign:FindFirstChild('Frame')
+                if frame then
+                    local label = frame:FindFirstChild('TextLabel')
+                    if label and label.Text then
+                        return label.Text:gsub("'s Base", '')
+                    end
+                end
+            end
+        end
+        
+        -- Try Owner value
+        if plot:FindFirstChild('Owner') then
+            local owner = plot.Owner
+            if owner:IsA('StringValue') or owner:IsA('ObjectValue') then
+                return tostring(owner.Value)
+            end
+        end
+        
+        return 'Unknown'
+    end)
+    
+    if success and result then return result end
+    return 'Unknown'
+end
+
+local function getBrainrotImageUrl(brainrotName)
+    local imageMap = {
+        ['Burguro And Fryuro'] = 'https://static.wikia.nocookie.net/stealabr/images/6/65/Burguro-And-Fryuro.png/revision/latest?cb=20251007133840',
+        ['Chicleteira Bicicleteira'] = 'https://static.wikia.nocookie.net/stealabr/images/5/5a/Chicleteira.png/revision/latest?cb=20250921012655',
+        ['Chillin Chilli'] = 'https://static.wikia.nocookie.net/stealabr/images/e/e0/Chilin.png/revision/latest?cb=20251006204612',
+        ['Dragon Canneloni'] = 'https://static.wikia.nocookie.net/stealabr/images/0/02/Dragoncanneloni.png/revision/latest?cb=20251006140921',
+        ['Esok Sekolah'] = 'https://static.wikia.nocookie.net/stealabr/images/2/2a/EsokSekolah2.png/revision/latest?cb=20250819001020',
+        ['Garama and Madundung'] = 'https://static.wikia.nocookie.net/stealabr/images/e/ee/Garamadundung.png/revision/latest?cb=20250816022557',
+        ['Ketchuru and Musturu'] = 'https://static.wikia.nocookie.net/stealabr/images/1/14/Ketchuru.png/revision/latest?cb=20250830231943',
+        ['Ketupat Kepat'] = 'https://static.wikia.nocookie.net/stealabr/images/a/ac/KetupatKepat.png/revision/latest?cb=20250823224356',
+        ['Tralaledon'] = 'https://static.wikia.nocookie.net/stealabr/images/7/79/Brr_Brr_Patapem.png/revision/latest?cb=20250909171639',
+        ['Tic Tac Sahur'] = 'https://static.wikia.nocookie.net/stealabr/images/6/6f/Time_moving_slow.png/revision/latest?cb=20250924041049',
+        ['Tang Tang Keletang'] = 'https://static.wikia.nocookie.net/stealabr/images/5/59/TangTangKelentangOriginal.webp/revision/latest?cb=20250928035320',
+        ['Tacorita Bicicleta'] = 'https://static.wikia.nocookie.net/stealabr/images/0/0f/Gonna_rob_you_twin.png/revision/latest?cb=20251006133721',
+        ['Spaghetti Tualetti'] = 'https://static.wikia.nocookie.net/stealabr/images/b/b8/Spaghettitualetti.png/revision/latest?cb=20250928162127',
+        ['Nuclearo Dinossauro'] = 'https://static.wikia.nocookie.net/stealabr/images/9/99/THERE_ARE_BUGS_UNDER_YOUR_SKIN.png/revision/latest?cb=20250902180735',
+        ['Nooo My Hotspot'] = 'https://static.wikia.nocookie.net/stealabr/images/9/97/NoMyHotspot.png/revision/latest?cb=20250818145403',
+        ['Money Money Puggy'] = 'https://static.wikia.nocookie.net/stealabr/images/0/09/Money_money_puggy.png/revision/latest?cb=20250928011934',
+        ['Mariachi Corazoni'] = 'https://static.wikia.nocookie.net/stealabr/images/5/5a/MariachiCora.png/revision/latest?cb=20251006211910',
+        ['Los Nooo My Hotspotsitos'] = 'https://static.wikia.nocookie.net/stealabr/images/c/cb/LosNooMyHotspotsitos.png/revision/latest?cb=20250903124000',
+        ['Los Primos'] = 'https://static.wikia.nocookie.net/stealabr/images/9/96/LosPrimos.png/revision/latest?cb=20251006044831',
+        ['Los Combinasionas'] = 'https://static.wikia.nocookie.net/stealabr/images/3/36/Stop_taking_my_chips_im_just_a_baybeh.png/revision/latest?cb=20250909223756',
+        ['Los 67'] = 'https://static.wikia.nocookie.net/stealabr/images/d/db/Los-67.png/revision/latest?cb=20251006195232',
+        ['Los Bros'] = 'https://static.wikia.nocookie.net/stealabr/images/5/53/BROOOOOOOO.png/revision/latest?cb=20250909152032',
+        ['Las Sis'] = 'https://static.wikia.nocookie.net/stealabr/images/e/e8/Las_Sis.png/revision/latest?cb=20250914042020',
+        ['La Secret Combinasion'] = 'https://static.wikia.nocookie.net/stealabr/images/f/f2/Lasecretcombinasion.png/revision/latest?cb=20251006044448',
+        ['La Grande Combinasion'] = 'https://static.wikia.nocookie.net/stealabr/images/d/d8/Carti.png/revision/latest?cb=20250909171004',
+        ['Pot Hotspot'] = 'https://static.wikia.nocookie.net/stealabr/images/4/4b/Pot_Hotspot.png/revision/latest?cb=20250915194349',
+        ['67'] = 'https://static.wikia.nocookie.net/stealabr/images/8/83/BOIIIIIII_SIX_SEVEN_%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82%F0%9F%98%82.png/revision/latest?cb=20250914041244',
+        ['La Spooky Grande'] = 'https://static.wikia.nocookie.net/stealabr/images/5/51/Spooky_Grande.png/revision/latest?cb=20251012022949',
+        ['Los Mobilis'] = 'https://static.wikia.nocookie.net/stealabr/images/2/27/Losmobil.png/revision/latest?cb=20251012023251',
+    }
+    return imageMap[brainrotName]
+end
+
+-- ==================== SEND TO SERVER ====================
+
+local function sendToRenderServer(brainrotData)
+    if not brainrotData or #brainrotData == 0 then
+        return false
+    end
+    
+    local playerCount = #Players:GetPlayers()
+    local maxPlayers = Players.MaxPlayers
+    local serverId = game.JobId
+    
+    -- Find highest generation
+    local highestGen = 0
+    local highestGenBrainrot = brainrotData[1]
+    
+    for _, data in ipairs(brainrotData) do
+        local genNumber = extractGenerationNumber(data.generation)
+        if genNumber > highestGen then
+            highestGen = genNumber
+            highestGenBrainrot = data
+        end
+    end
+    
+    -- Skip if too low
+    if highestGen <= MIN_GENERATION then
+        print("⏭️  Skipping (gen too low):", highestGen)
+        return false
+    end
+    
+    -- Sort by generation
+    table.sort(brainrotData, function(a, b)
+        return extractGenerationNumber(a.generation) > extractGenerationNumber(b.generation)
+    end)
+    
+    -- Color based on generation
+    local colorMap = {
+        [1] = 0x5bc0be, [2] = 0x56cc9d, [3] = 0xffd166,
+        [4] = 0xf76e11, [5] = 0xd72660, [6] = 0x613dc1,
+    }
+    local colorLevel = 1
+    if highestGen > 1 then colorLevel = 2 end
+    if highestGen > 10 then colorLevel = 3 end
+    if highestGen > 50 then colorLevel = 4 end
+    if highestGen > 100 then colorLevel = 5 end
+    if highestGen > 500 then colorLevel = 6 end
+    
+    -- Build brainrot list
+    local brainrotLines = {}
+    for _, data in ipairs(brainrotData) do
+        table.insert(brainrotLines, string.format(
+            '**%dx %s** [`%s`]',
+            data.count or 1,
+            data.name or 'Unknown',
+            data.generation or '?'
+        ))
+    end
+    
+    -- Create embed
+    local embed = {
+        embeds = {
+            {
+                title = string.format('🧬 %dx %s [%s]', 
+                    highestGenBrainrot.count or 1,
+                    highestGenBrainrot.name or 'Unknown',
+                    highestGenBrainrot.generation or '?'
+                ),
+                description = ":sparkles: **Sour Notifier**\nGO GET IT NOW!",
+                color = colorMap[colorLevel] or 0x5bc0be,
+                fields = {
+                    {
+                        name = "🧠 Brainrots",
+                        value = table.concat(brainrotLines, '\n'),
+                        inline = false
+                    },
+                    {
+                        name = ":id: Server ID",
+                        value = string.format('```%s```', serverId),
+                        inline = true
+                    },
+                    {
+                        name = ":crown: Base Owner",
+                        value = string.format('```%s```', highestGenBrainrot.owner or 'Unknown'),
+                        inline = true
+                    },
+                    {
+                        name = ":busts_in_silhouette: Players",
+                        value = string.format('```%d/%d```', playerCount, maxPlayers),
+                        inline = false
+                    }
+                },
+                footer = { text = "Sour Notifier | v2.0" },
+                timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ'),
+                thumbnail = {
+                    url = getBrainrotImageUrl(highestGenBrainrot.name)
+                }
+            }
+        }
+    }
+    
+    -- Send to server
+    local success, response = pcall(function()
+        return request({
+            Url = RENDER_URL .. "/notify",
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode(embed)
+        })
+    end)
+    
+    if success and response.StatusCode == 200 then
+        print("✅ Sent to server:", highestGenBrainrot.name, highestGenBrainrot.generation)
+        return true
+    else
+        warn("❌ Failed to send:", success and response.StatusCode or "No response")
+        return false
+    end
+end
+
+-- ==================== SCAN PLOTS ====================
+
+local function scanPlots()
+    print("🔍 Starting plot scan...")
+    
+    if not workspace:FindFirstChild('Plots') then
+        warn("❌ No Plots folder found!")
+        return 0
+    end
+    
+    local ownerData = {}
+    local totalFound = 0
+    
+    for _, plot in pairs(workspace.Plots:GetChildren()) do
+        local owner = getPlotOwner(plot)
+        local animalPodiums = plot:FindFirstChild('AnimalPodiums')
+        
+        if animalPodiums then
+            for _, podium in pairs(animalPodiums:GetChildren()) do
+                local base = podium:FindFirstChild('Base')
+                if base then
+                    local spawn = base:FindFirstChild('Spawn')
+                    if spawn and spawn:FindFirstChild('Attachment') then
+                        local overhead = spawn.Attachment:FindFirstChild('AnimalOverhead')
+                        if overhead then
+                            local nameLabel = overhead:FindFirstChild('DisplayName')
+                            local genLabel = overhead:FindFirstChild('Generation')
+                            
+                            if nameLabel and genLabel then
+                                local brainrotName = nameLabel.Text
+                                local generation = genLabel.Text or tostring(genLabel.Value)
+                                local genNum = extractGenerationNumber(generation)
+                                
+                                if genNum >= MIN_GENERATION then
+                                    totalFound = totalFound + 1
+                                    print("🧬 Found:", brainrotName, generation)
+                                    
+                                    ownerData[owner] = ownerData[owner] or {}
+                                    table.insert(ownerData[owner], {
+                                        name = brainrotName,
+                                        generation = generation,
+                                        owner = owner,
+                                        count = 1
+                                    })
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Send notifications for each owner (removed delay between sends)
+    local sentCount = 0
+    for owner, brainrots in pairs(ownerData) do
+        if #brainrots > 0 then
+            if sendToRenderServer(brainrots) then
+                sentCount = sentCount + 1
+            end
+        end
+    end
+    
+    print("📊 Scan complete! Found:", totalFound, "| Sent:", sentCount)
+    return sentCount
+end
+
+-- ==================== SERVER HOPPING ====================
+
+
+wait(20)
+
+local function getJobIds()
+    local success, result = pcall(function()
+        local response = request({
+            Url = RENDER_URL .. "/jobs",
+            Method = "GET"
+        })
+        if response.StatusCode == 200 then
+            local data = HttpService:JSONDecode(response.Body)
+            return data.jobIds or {}
+        end
+        return {}
+    end)
+    return (success and result) or {}
+end
+
+local function removeJobId(jobId)
+    pcall(function()
+        request({
+            Url = RENDER_URL .. "/remove",
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode({ jobId = jobId })
+        })
+    end)
+end
+
+local function startTeleporting()
+    print("🔄 Starting server hopping...")
+    
+    while true do
+        local jobIds = getJobIds()
+        
+        if #jobIds > 0 then
+            local randomIndex = RNG:NextInteger(1, #jobIds)
+            local jobId = jobIds[randomIndex]
+            
+            print("🚀 Hopping to server:", jobId)
+            
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, Players.LocalPlayer)
+            end)
+            
+            removeJobId(jobId)
+        else
+            warn("⚠️ No job IDs available, retrying immediately...")
+        end
+    end
+end
+
+-- ==================== MAIN EXECUTION ====================
+
+local function main()
+    print("⏳ Waiting for game to be ready...")
+    
+    repeat task.wait() until game:IsLoaded()
+    repeat task.wait() until Players.LocalPlayer
+    repeat task.wait() until Players.LocalPlayer.Character
+    repeat task.wait() until workspace:FindFirstChild("Plots")
+    
+    print("✅ Game ready!")
+    
+    -- Prevent multiple runs
+    if _G.SCANNER_RUNNING then
+        print("⚠️ Scanner already running!")
+        return
+    end
+    _G.SCANNER_RUNNING = true
+    
+    -- Scan the current server
+    print("\n" .. string.rep("-", 50))
+    local foundCount = scanPlots()
+    print(string.rep("-", 50) .. "\n")
+    
+    if foundCount == 0 then
+        print("💡 No brainrots found in this server")
+    else
+        print("✅ Notifications sent! Check /logs page")
+    end
+    
+    -- Start server hopping immediately
+    _G.SCAN_COMPLETE = true
+    startTeleporting()
+end
+
+-- Set teleport GUI
+pcall(function()
+    TeleportService:SetTeleportGui(game:GetService("CoreGui"):WaitForChild("RobloxGui"))
+end)
+
+-- Start the script immediately
+main()
